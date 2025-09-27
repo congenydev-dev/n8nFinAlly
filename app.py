@@ -1,14 +1,49 @@
 import streamlit as st
 import requests
-import json
-import pandas as pd
-# Импортируем исполнение кода
-from io import StringIO
-import contextlib
 
-# ... (ваш существующий код: N8N_WEBHOOK_URL, css_style, st.markdown, st.session_state) ...
+N8N_WEBHOOK_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
 
-# ... (ваш существующий цикл for message in st.session_state.messages) ...
+css_style = """
+<style>
+[data-testid="stAppViewContainer"] > .main {
+    background-color: #1E1E1E;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    min-height: 100vh;
+}
+[data-testid="stHeader"] {
+    background-color: rgba(0,0,0,0);
+}
+.st-emotion-cache-183lzff {
+    color: #FAFAFA;
+}
+[data-testid="stChatMessage"] {
+    background-color: #262730;
+    border-radius: 10px;
+    padding: 12px;
+}
+[data-testid="stChatInput"] {
+    background-color: #1E1E1E;
+}
+[data-testid="stChatInput"] textarea {
+    height: 120px;
+    font-size: 1.1rem;
+}
+</style>
+"""
+st.markdown(css_style, unsafe_allow_html=True)
+
+st.markdown("<div style='text-align: center;'>©Приветствую. Я ваш<br>Аналитический<br>Интеллектуальный Агент,<br>готовый к обработке. И помните:<br>если будете долго задавать<br>вопрос, не волнуйтесь — я не<br>заржавею, скорее, закодируюсь</div>", unsafe_allow_html=True)
+
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "## Кого будем увольнять?"}]
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
 if prompt := st.chat_input("Your message..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -17,46 +52,13 @@ if prompt := st.chat_input("Your message..."):
 
     try:
         payload = {"message": prompt}
-        with st.spinner('Агент думает...'):
+        with st.spinner('Thinking...'):
             response = requests.post(N8N_WEBHOOK_URL, json=payload)
             response.raise_for_status()
-            
-            # --- ИЗМЕНЕНИЕ 1: Ожидаем JSON с тремя ключами ---
-            n8n_response_data = response.json()
-            
-            # Извлекаем компоненты
-            response_text = n8n_response_data.get("text", "Извините, ответ не получен.")
-            response_code = n8n_response_data.get("code", "")
-            response_data_json = n8n_response_data.get("data", None)
-            
-            # --- Сохраняем текстовый ответ в историю ---
-            st.session_state.messages.append({"role": "assistant", "content": response_text})
-            with st.chat_message("assistant"):
-                st.markdown(response_text)
-            
-            # --- ИЗМЕНЕНИЕ 2: Исполнение кода для визуализации ---
-            if response_code:
-                st.markdown("---") # Визуальный разделитель
-                st.markdown("**Визуализация данных:**")
-                
-                # Если n8n прислал данные, создаем из них DataFrame, доступный для кода
-                if response_data_json:
-                    # Создаем глобальную переменную 'df'
-                    df = pd.DataFrame(response_data_json)
-                else:
-                    df = None # Если данных нет, df будет None
+            bot_response = response.json().get("choices", [{}])[0].get("message", {}).get("content", "Sorry, something went wrong.")
 
-                # Исполняем Python-код, присланный LLM/n8n
-                with st.chat_message("assistant"):
-                    try:
-                        # Захватываем вывод print(), чтобы он не загромождал консоль
-                        with contextlib.redirect_stdout(StringIO()):
-                            # Используем exec для выполнения сгенерированного кода
-                            exec(response_code, globals())
-                    except Exception as e:
-                        st.error(f"Не удалось построить график. Ошибка в коде: {e}")
-
+        st.session_state.messages.append({"role": "assistant", "content": bot_response})
+        with st.chat_message("assistant"):
+            st.markdown(bot_response)
     except requests.exceptions.RequestException as e:
-        st.error(f"Ошибка подключения к n8n workflow: {e}")
-    except json.JSONDecodeError:
-        st.error("Ошибка декодирования JSON: N8n вернул неверный формат.")
+        st.error(f"Error connecting to n8n workflow: {e}")
