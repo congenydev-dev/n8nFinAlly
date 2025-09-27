@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 
 # URL вашего активного вебхука из n8n
-N8N_WEBHOOK_URL = "https://your-n8n-instance.com/webhook/chatbot-webhook"
+N8N_WEBHOOK_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
 
 # --- Секция для изменения стиля ---
 # Просто меняйте коды цветов здесь, чтобы найти свой стиль
@@ -61,4 +61,5 @@ if prompt := st.chat_input("Your message..."):
         with st.chat_message("assistant"):
             st.markdown(bot_response)
     except requests.exceptions.RequestException as e:
+
         st.error(f"Error connecting to n8n workflow: {e}")
