@@ -5,7 +5,7 @@ import plotly.express as px
 import uuid # <-- 1. Импортируем библиотеку для генерации ID
 
 # --- Конфигурация ---
-N8N_WEBHOOK_URL = "https://finally.app.n8n.cloud/webhook/12233d88-06cd-43cf-80f5-dacf042d14e6"
+N8N_WEBHOOK_URL = "https://finally.app.n8n.cloud/webhook/db5c7e45-19fe-4971-aa59-22256f288c50"
 
 def display_chart(chart_info: dict):
     # ... (эта функция остается без изменений) ...
