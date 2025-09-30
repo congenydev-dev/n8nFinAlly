@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import plotly.express as px
 import uuid
+import streamlit.components.v1 as components
 
 # ---------- Page ----------
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
@@ -32,7 +33,7 @@ def fetch_from_n8n(prompt: str, session_id: str):
     r.raise_for_status()
     return r.json()
 
-def display_chart(chart_info: dict):
+def display_chart(chart_info: dict, key: str | None = None):
     """
     Поддерживаемые типы: bar_chart, line_chart
     Ожидаемые поля: data(list|dict), x_column(str), y_column(str|list[str])
@@ -53,15 +54,33 @@ def display_chart(chart_info: dict):
         elif chart_type == "line_chart":
             fig = px.line(df, x=x_col, y=y_col, title=title, template="plotly_white", markers=True)
         else:
-            st.warning(f"Тип графика '{chart_type}' не поддерживается (разрешены: bar_chart, line_chart).")
+            st.warning("Тип графика не поддерживается (разрешены: bar_chart, line_chart).")
             return
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=key)
         if chart_info.get("show_table"):
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, use_container_width=True, key=f"{key}-table" if key else None)
 
     except Exception as e:
         st.error(f"Не удалось отобразить график. Ошибка: {e}")
+
+def scroll_to_bottom():
+    # лёгкая автопрокрутка к последнему сообщению
+    components.html(
+        """
+        <script>
+        (function(){
+          try{
+            const p = window.parent;
+            const main = p.document.querySelector('section.main') || p.document.body;
+            main.scrollTo({ top: main.scrollHeight, behavior: 'instant' });
+          }catch(e){}
+        })();
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
 
 # ---------- State ----------
 if "session_id" not in st.session_state:
@@ -74,18 +93,19 @@ st.title("Аналитический AI-агент")
 st.markdown("Здравствуйте! Я ваш аналитический AI-агент. Попросите меня визуализировать данные.")
 st.divider()
 
-# История
-for message in st.session_state.messages:
+# История (с уникальными ключами для графиков)
+for i, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "chart" in message:
-            display_chart(message["chart"])
+            display_chart(message["chart"], key=f"chart-{i}")
+
+# автопрокрутка к последнему сообщению
+scroll_to_bottom()
 
 # Ввод
 if prompt := st.chat_input("Спросите что-нибудь о ваших данных..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
 
     try:
         with st.spinner('Анализирую...'):
@@ -100,10 +120,8 @@ if prompt := st.chat_input("Спросите что-нибудь о ваших �
 
         st.session_state.messages.append(assistant_message)
 
-        with st.chat_message("assistant"):
-            st.markdown(text_response)
-            if "chart" in assistant_message:
-                display_chart(assistant_message["chart"])
+        # перерисуем через историю (чтобы не дублировать график и не ловить конфликт ID)
+        st.experimental_rerun()
 
     except requests.exceptions.RequestException as e:
         st.error(f"Ошибка подключения к workflow: {e}")
