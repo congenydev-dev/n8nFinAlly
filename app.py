@@ -1,113 +1,85 @@
 import json
 import uuid
 import requests
-import pandas as pd
 import streamlit as st
 
-# ---------------- Config ----------------
-URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
+# ========= Config =========
+URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"  # Production URL
 CONNECT_TIMEOUT, READ_TIMEOUT = 10, 120
 
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
 st.title("Аналитический AI-агент")
 st.caption("Пишите вопрос — агент сам выберет источник (тексты/встречи) и ответит на русском.")
 
-# ---------------- Helpers ----------------
-def clean_json_text(text: str) -> str:
-    """Снимает обёртки ```json … ``` и лишние пробелы/бектики."""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.lstrip("`")
-        if t.lower().startswith("json"):
-            t = t[4:]
-        t = t.strip("` \n\r\t")
-    return t
+# ========= Helpers =========
+TEXT_KEYS = ("text", "text_markdown", "text_response", "output", "message")
 
-def parse_payload_from_response(resp: requests.Response) -> dict | str:
-    """
-    Возвращает:
-      - dict (если пришёл объект или текст с JSON внутри)
-      - str (если это чистый текст)
-    """
+def _clean_json_text(s: str) -> str:
+    s = (s or "").strip()
+    if s.startswith("```"):
+        s = s.lstrip("`")
+        if s.lower().startswith("json"):
+            s = s[4:]
+        s = s.strip("` \n\r\t")
+    return s
+
+def _text_from_response(resp: requests.Response) -> str:
+    """Возвращает человекочитаемый текст из ответа (JSON или text/plain)."""
     ctype = (resp.headers.get("content-type") or "").lower()
-    text = resp.text
-    # если сервер честно прислал application/json
+    body = resp.text
+
+    # 1) Нормальный JSON
     if "application/json" in ctype:
         try:
-            return resp.json()
+            data = resp.json()
+            if isinstance(data, dict):
+                for k in TEXT_KEYS:
+                    v = data.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v
+                return json.dumps(data, ensure_ascii=False)
         except Exception:
             pass
-    # иногда присылают text/plain с JSON внутри
+
+    # 2) Текст с JSON внутри (или двойная сериализация)
     try:
-        first = json.loads(clean_json_text(text))
+        first = json.loads(_clean_json_text(body))
+        if isinstance(first, dict):
+            for k in TEXT_KEYS:
+                v = first.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v
+            return json.dumps(first, ensure_ascii=False)
         if isinstance(first, str):
-            # двойная сериализация: JSON-строка внутри строки
+            # возможно, JSON-строка внутри строки
             try:
-                return json.loads(clean_json_text(first))
+                second = json.loads(_clean_json_text(first))
+                if isinstance(second, dict):
+                    for k in TEXT_KEYS:
+                        v = second.get(k)
+                        if isinstance(v, str) and v.strip():
+                            return v
+                    return json.dumps(second, ensure_ascii=False)
+                if isinstance(second, str):
+                    return second
             except Exception:
-                return {"text_markdown": first}
-        return first
+                return first
     except Exception:
-        return text  # обычный текст
+        pass
 
-def as_df(data):
-    if isinstance(data, list):
-        return pd.DataFrame(data)
-    if isinstance(data, dict):
-        return pd.DataFrame([data])
-    return pd.DataFrame()
+    # 3) Обычный текст
+    return body
 
-def draw_chart(chart: dict, key_prefix: str = ""):
-    """
-    chart = {
-      "type": "bar_chart" | "line_chart",
-      "x_column": "X",
-      "y_column": "Y" | ["Y1","Y2"],
-      "data": [ {X:..., Y:...}, ... ],
-      "title": "..."
-    }
-    """
-    if not isinstance(chart, dict):
-        return
-    df = as_df(chart.get("data", []))
-    x = chart.get("x_column")
-    y = chart.get("y_column")
-    if df.empty or not x or not y or x not in df.columns:
-        return
-
-    title = chart.get("title", "")
-    if isinstance(y, list):
-        for i, col in enumerate(y):
-            if col not in df.columns:
-                continue
-            if title:
-                st.subheader(f"{title} — {col}")
-            d = df[[x, col]].set_index(x)
-            if chart.get("type") == "line_chart":
-                st.line_chart(d, use_container_width=True, key=f"{key_prefix}-line-{i}")
-            else:
-                st.bar_chart(d, use_container_width=True, key=f"{key_prefix}-bar-{i}")
-    else:
-        if y not in df.columns:
-            return
-        if title:
-            st.subheader(title)
-        d = df[[x, y]].set_index(x)
-        if chart.get("type") == "line_chart":
-            st.line_chart(d, use_container_width=True, key=f"{key_prefix}-line")
-        else:
-            st.bar_chart(d, use_container_width=True, key=f"{key_prefix}-bar")
-
-def post_to_n8n(prompt: str, session_id: str) -> requests.Response:
+def ask_agent(prompt: str, session_id: str) -> str:
     r = requests.post(
         URL,
         json={"prompt": prompt, "sessionId": session_id},
         timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
     )
     r.raise_for_status()
-    return r
+    return _text_from_response(r)
 
-# ---------------- State ----------------
+# ========= State =========
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
@@ -116,57 +88,27 @@ if "history" not in st.session_state:
         {"role": "assistant", "content": "Какие данные проанализируем сегодня?"}
     ]
 
-# ---------------- Render history ----------------
-for i, msg in enumerate(st.session_state.history):
+# ========= Render history =========
+for msg in st.session_state.history:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        for j, ch in enumerate(msg.get("charts", [])):
-            draw_chart(ch, key_prefix=f"msg-{i}-{j}")
 
-# ---------------- Input + immediate echo ----------------
+# ========= Input & answer =========
 if user_text := st.chat_input("Ваш вопрос…"):
-    # 1) Сразу покажем сообщение пользователя в текущем проходе
+    # мгновенно отрисуем пользователя
     with st.chat_message("user"):
         st.markdown(user_text)
-
-    # 2) Сохраним в историю
     st.session_state.history.append({"role": "user", "content": user_text})
 
-    # 3) Получим ответ агента
+    # запрос к агенту
     with st.chat_message("assistant"):
         with st.spinner("Анализирую…"):
             try:
-                resp = post_to_n8n(user_text.strip(), st.session_state.session_id)
-                payload = parse_payload_from_response(resp)
-
-                # Извлечём текст и графики
-                charts = []
-                if isinstance(payload, dict):
-                    text = (
-                        payload.get("text_markdown")
-                        or payload.get("text_response")
-                        or payload.get("output")
-                        or payload.get("text")
-                        or ""
-                    )
-                    if isinstance(payload.get("chart_data"), dict):
-                        charts = [payload["chart_data"]]
-                    elif isinstance(payload.get("charts"), list):
-                        charts = payload["charts"]
-                else:
-                    text = payload  # это строка
-
+                text = ask_agent(user_text.strip(), st.session_state.session_id)
                 st.markdown(text or "_пустой ответ_")
-                for k, ch in enumerate(charts):
-                    draw_chart(ch, key_prefix=f"last-{k}")
-
-                # Сохраним в историю и графики
-                st.session_state.history.append(
-                    {"role": "assistant", "content": text, "charts": charts}
-                )
-
+                st.session_state.history.append({"role": "assistant", "content": text or ""})
             except requests.exceptions.ReadTimeout:
-                st.error("Таймаут ожидания ответа. Проверь настройки Respond to Webhook или сократи запрос.")
+                st.error("Таймаут ожидания ответа. Проверь узел Respond to Webhook или сократи запрос.")
             except requests.exceptions.RequestException as e:
                 st.error(f"Ошибка подключения к workflow: {e}")
             except Exception as e:
