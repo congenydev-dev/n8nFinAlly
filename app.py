@@ -5,6 +5,13 @@ import plotly.express as px
 import uuid
 import streamlit.components.v1 as components
 
+def do_rerun():
+    try:
+        st.rerun()
+    except AttributeError:
+        # на старых версиях (<=1.22) ещё есть experimental_rerun
+        st.experimental_rerun()
+
 # ---------- Page ----------
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
 
@@ -121,7 +128,7 @@ if prompt := st.chat_input("Спросите что-нибудь о ваших �
         st.session_state.messages.append(assistant_message)
 
         # перерисуем через историю (чтобы не дублировать график и не ловить конфликт ID)
-        st.experimental_rerun()
+        do_rerun()
 
     except requests.exceptions.RequestException as e:
         st.error(f"Ошибка подключения к workflow: {e}")
