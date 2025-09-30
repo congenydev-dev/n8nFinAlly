@@ -16,7 +16,7 @@ def do_rerun():
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
 
 # ---------- Config ----------
-N8N_WEBHOOK_URL = "https://finally.app.n8n.cloud/webhook/550ca24c-1f7c-47fd-8f44-8028fb7ecd0d"
+N8N_WEBHOOK_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
 
 # ---------- Helpers ----------
 def _to_df(data) -> pd.DataFrame:
