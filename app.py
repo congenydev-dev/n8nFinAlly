@@ -1,138 +1,125 @@
+import json, uuid, requests, pandas as pd
 import streamlit as st
-import requests
-import pandas as pd
-import plotly.express as px
-import uuid
-import streamlit.components.v1 as components
 
-def do_rerun():
-    try:
-        st.rerun()
-    except AttributeError:
-        # на старых версиях (<=1.22) ещё есть experimental_rerun
-        st.experimental_rerun()
+URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
+CONNECT_TIMEOUT, READ_TIMEOUT = 10, 120
 
-# ---------- Page ----------
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
+st.title("Аналитический AI-агент")
+st.caption("Пишите вопрос — агент сам выберет источник (тексты/встречи) и ответит на русском.")
 
-# ---------- Config ----------
-N8N_WEBHOOK_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
+# ---- helpers ----
+def clean_json(text: str) -> str:
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.lstrip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+        t = t.strip("` \n\r\t")
+    return t
 
-# ---------- Helpers ----------
-def _to_df(data) -> pd.DataFrame:
+def try_json(resp: requests.Response):
+    ctype = resp.headers.get("content-type","").lower()
+    txt = resp.text
+    if "application/json" in ctype:
+        try:
+            return resp.json()
+        except Exception:
+            pass
+    # иногда присылают текст с JSON-внутри
+    try:
+        return json.loads(clean_json(txt))
+    except Exception:
+        return None
+
+def as_df(data):
     if isinstance(data, list):
         return pd.DataFrame(data)
-    elif isinstance(data, dict):
+    if isinstance(data, dict):
         return pd.DataFrame([data])
     return pd.DataFrame()
 
-def _require_fields(d: dict, fields: list) -> bool:
-    for f in fields:
-        if d.get(f) in (None, "", []):
-            st.warning(f"Ответ сервера не содержит обязательное поле '{f}'.")
-            return False
-    return True
+def draw_chart(chart: dict, key_prefix: str = ""):
+    """
+    chart = {
+      "type": "bar_chart" | "line_chart",
+      "x_column": "X",
+      "y_column": "Y" | ["Y1","Y2"],
+      "data": [ {X:..., Y:...}, ... ],
+      "title": "..."
+    }
+    """
+    if not isinstance(chart, dict):
+        return
+    df = as_df(chart.get("data", []))
+    x = chart.get("x_column"); y = chart.get("y_column")
+    if df.empty or not x or not y or x not in df.columns:
+        return
 
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_from_n8n(prompt: str, session_id: str):
-    payload = {"prompt": prompt, "sessionId": session_id}
-    r = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=30)
+    if isinstance(y, list):
+        for i, col in enumerate(y):
+            if col not in df.columns: 
+                continue
+            st.subheader(chart.get("title", f"{col} by {x}"))
+            st.bar_chart(df[[x, col]].set_index(x), use_container_width=True, key=f"{key_prefix}-bar-{i}") \
+                if chart.get("type") == "bar_chart" else \
+                st.line_chart(df[[x, col]].set_index(x), use_container_width=True, key=f"{key_prefix}-line-{i}")
+    else:
+        if y not in df.columns: 
+            return
+        st.subheader(chart.get("title", f"{y} by {x}"))
+        st.bar_chart(df[[x, y]].set_index(x), use_container_width=True, key=f"{key_prefix}-bar") \
+            if chart.get("type") == "bar_chart" else \
+            st.line_chart(df[[x, y]].set_index(x), use_container_width=True, key=f"{key_prefix}-line")
+
+def post_to_n8n(prompt: str, session_id: str):
+    r = requests.post(URL, json={"prompt": prompt, "sessionId": session_id},
+                      timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
     r.raise_for_status()
-    return r.json()
+    return r
 
-def display_chart(chart_info: dict, key: str | None = None):
-    """
-    Поддерживаемые типы: bar_chart, line_chart
-    Ожидаемые поля: data(list|dict), x_column(str), y_column(str|list[str])
-    """
-    try:
-        df = _to_df(chart_info.get("data"))
-        chart_type = chart_info.get("type", "bar_chart")
-        x_col = chart_info.get("x_column")
-        y_col = chart_info.get("y_column")
-
-        if not _require_fields(chart_info, ["x_column", "y_column"]):
-            return
-
-        title = chart_info.get("title") or (f"{y_col} по {x_col}" if y_col and x_col else "Chart")
-
-        if chart_type == "bar_chart":
-            fig = px.bar(df, x=x_col, y=y_col, title=title, template="plotly_white", barmode="group")
-        elif chart_type == "line_chart":
-            fig = px.line(df, x=x_col, y=y_col, title=title, template="plotly_white", markers=True)
-        else:
-            st.warning("Тип графика не поддерживается (разрешены: bar_chart, line_chart).")
-            return
-
-        st.plotly_chart(fig, use_container_width=True, key=key)
-        if chart_info.get("show_table"):
-            st.dataframe(df, use_container_width=True, key=f"{key}-table" if key else None)
-
-    except Exception as e:
-        st.error(f"Не удалось отобразить график. Ошибка: {e}")
-
-def scroll_to_bottom():
-    # лёгкая автопрокрутка к последнему сообщению
-    components.html(
-        """
-        <script>
-        (function(){
-          try{
-            const p = window.parent;
-            const main = p.document.querySelector('section.main') || p.document.body;
-            main.scrollTo({ top: main.scrollHeight, behavior: 'instant' });
-          }catch(e){}
-        })();
-        </script>
-        """,
-        height=0,
-        scrolling=False,
-    )
-
-# ---------- State ----------
+# ---- state ----
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Какие данные проанализируем сегодня?"}]
+if "history" not in st.session_state:
+    st.session_state.history = [{"role":"assistant","content":"Какие данные проанализируем сегодня?"}]
 
-# ---------- UI ----------
-st.title("Аналитический AI-агент")
-st.markdown("Здравствуйте! Я ваш аналитический AI-агент. Попросите меня визуализировать данные.")
-st.divider()
+# ---- render history ----
+for i, msg in enumerate(st.session_state.history):
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        for ch_i, ch in enumerate(msg.get("charts", [])):
+            draw_chart(ch, key_prefix=f"msg{i}-{ch_i}")
 
-# История (с уникальными ключами для графиков)
-for i, message in enumerate(st.session_state.messages):
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if "chart" in message:
-            display_chart(message["chart"], key=f"chart-{i}")
+# ---- input ----
+if user_text := st.chat_input("Ваш вопрос…"):
+    st.session_state.history.append({"role":"user","content":user_text})
+    with st.chat_message("assistant"):
+        with st.spinner("Анализирую…"):
+            try:
+                resp = post_to_n8n(user_text.strip(), st.session_state.session_id)
+                payload = try_json(resp)
 
-# автопрокрутка к последнему сообщению
-scroll_to_bottom()
+                charts = []
+                if isinstance(payload, dict):
+                    text = payload.get("text_markdown") or payload.get("text_response") or ""
+                    # поддержка одного графика или массива
+                    if isinstance(payload.get("chart_data"), dict):
+                        charts = [payload["chart_data"]]
+                    elif isinstance(payload.get("charts"), list):
+                        charts = payload["charts"]
+                else:
+                    text = resp.text  # пришёл чистый текст
 
-# Ввод
-if prompt := st.chat_input("Спросите что-нибудь о ваших данных..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+                st.markdown(text or resp.text or "_пустой ответ_")
+                for i, ch in enumerate(charts):
+                    draw_chart(ch, key_prefix=f"last-{i}")
 
-    try:
-        with st.spinner('Анализирую...'):
-            json_response = fetch_from_n8n(prompt.strip(), st.session_state.session_id)
+                st.session_state.history.append({"role":"assistant","content": text or resp.text, "charts": charts})
 
-        text_response = json_response.get("text_response", "Получен пустой ответ от сервера.")
-        chart_info = json_response.get("chart_data")
-
-        assistant_message = {"role": "assistant", "content": text_response}
-        if isinstance(chart_info, dict) and chart_info.get("data"):
-            assistant_message["chart"] = chart_info
-
-        st.session_state.messages.append(assistant_message)
-
-        # перерисуем через историю (чтобы не дублировать график и не ловить конфликт ID)
-        do_rerun()
-
-    except requests.exceptions.RequestException as e:
-        st.error(f"Ошибка подключения к workflow: {e}")
-    except requests.exceptions.JSONDecodeError:
-        st.error("Ответ сервера не JSON.")
-    except Exception as e:
-        st.error(f"Произошла ошибка: {e}")
+            except requests.exceptions.ReadTimeout:
+                st.error("Таймаут ожидания ответа. Проверь настройки Respond to Webhook или сократи запрос.")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Ошибка подключения к workflow: {e}")
+            except Exception as e:
+                st.error(f"Неожиданная ошибка: {e}")
