@@ -112,4 +112,62 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
 if "history" not in st.session_state:
-    st.session_state.his_
+    st.session_state.history = [
+        {"role": "assistant", "content": "Какие данные проанализируем сегодня?"}
+    ]
+
+# ---------------- Render history ----------------
+for i, msg in enumerate(st.session_state.history):
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        for j, ch in enumerate(msg.get("charts", [])):
+            draw_chart(ch, key_prefix=f"msg-{i}-{j}")
+
+# ---------------- Input + immediate echo ----------------
+if user_text := st.chat_input("Ваш вопрос…"):
+    # 1) Сразу покажем сообщение пользователя в текущем проходе
+    with st.chat_message("user"):
+        st.markdown(user_text)
+
+    # 2) Сохраним в историю
+    st.session_state.history.append({"role": "user", "content": user_text})
+
+    # 3) Получим ответ агента
+    with st.chat_message("assistant"):
+        with st.spinner("Анализирую…"):
+            try:
+                resp = post_to_n8n(user_text.strip(), st.session_state.session_id)
+                payload = parse_payload_from_response(resp)
+
+                # Извлечём текст и графики
+                charts = []
+                if isinstance(payload, dict):
+                    text = (
+                        payload.get("text_markdown")
+                        or payload.get("text_response")
+                        or payload.get("output")
+                        or payload.get("text")
+                        or ""
+                    )
+                    if isinstance(payload.get("chart_data"), dict):
+                        charts = [payload["chart_data"]]
+                    elif isinstance(payload.get("charts"), list):
+                        charts = payload["charts"]
+                else:
+                    text = payload  # это строка
+
+                st.markdown(text or "_пустой ответ_")
+                for k, ch in enumerate(charts):
+                    draw_chart(ch, key_prefix=f"last-{k}")
+
+                # Сохраним в историю и графики
+                st.session_state.history.append(
+                    {"role": "assistant", "content": text, "charts": charts}
+                )
+
+            except requests.exceptions.ReadTimeout:
+                st.error("Таймаут ожидания ответа. Проверь настройки Respond to Webhook или сократи запрос.")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Ошибка подключения к workflow: {e}")
+            except Exception as e:
+                st.error(f"Неожиданная ошибка: {e}")
