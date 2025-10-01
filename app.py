@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import uuid
-import time
 import pandas as pd
 
 # ================== КОНФИГУРАЦИЯ ==================
@@ -71,7 +70,6 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
 if "messages" not in st.session_state:
-    # <<< ИЗМЕНЕНО ЗДЕСЬ
     st.session_state.messages = [{"role": "assistant", "content": "Кого будем увольнять сегодня?"}]
 
 
@@ -83,15 +81,14 @@ for message in st.session_state.messages:
             try:
                 chart_info = message["chart"]
                 df = pd.DataFrame(chart_info['data'])
-                x_col = chart_info['x_column']
-                y_col = chart_info['y_column']
-
+                df = df.set_index(chart_info['x_column'])
+                
                 if chart_info['type'] == 'bar_chart':
-                    st.bar_chart(df, x=x_col, y=y_col)
+                    st.bar_chart(df)
                 elif chart_info['type'] == 'line_chart':
-                    st.line_chart(df, x=x_col, y=y_col)
+                    st.line_chart(df)
             except Exception as e:
-                st.error(f"Не удалось построить график: {e}")
+                st.error(f"Не удалось построить график из истории: {e}")
 
 
 # ================== UI: ПОЛЕ ВВОДА И ОБРАБОТКА ЗАПРОСА ==================
@@ -113,15 +110,14 @@ if prompt := st.chat_input("Ваш вопрос..."):
         if chart_data:
             try:
                 df = pd.DataFrame(chart_data['data'])
-                x_col = chart_data['x_column']
-                y_col = chart_data['y_column']
+                df = df.set_index(chart_data['x_column'])
 
                 if chart_data['type'] == 'bar_chart':
-                    st.bar_chart(df, x=x_col, y=y_col)
+                    st.bar_chart(df)
                 elif chart_data['type'] == 'line_chart':
-                    st.line_chart(df, x=x_col, y=y_col)
+                    st.line_chart(df)
             except Exception as e:
-                st.error(f"Не удалось построить график: {e}")
+                st.error(f"Не удалось построить новый график: {e}")
 
     st.session_state.messages.append({
         "role": "assistant", 
