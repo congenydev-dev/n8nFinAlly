@@ -1,122 +1,124 @@
-import time
-import uuid
-import random
-import requests
 import streamlit as st
+import requests
+import uuid
+import time
+import random
 
-# ================== CONFIG ==================
+# ================== КОНФИГУРАЦИЯ ==================
+# URL вашего вебхука в n8n
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
-TIMEOUT = (10, 120)  # connect, read
-MAX_RETRIES = 3      # мягкие ретраи на 429
+TIMEOUT = (10, 120)  # (connect, read) в секундах
 
+# ================== НАСТРОЙКА СТРАНИЦЫ ==================
+# Используем st.set_page_config() в самом начале
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
-st.title("Аналитический AI-агент")
 
-# --------- Sidebar (debug / settings) ----------
-with st.sidebar:
-    st.caption("⚙️ Настройки")
-    url = st.text_input("Webhook URL", value=N8N_URL)
-    debug = st.checkbox("Показывать сырой ответ", value=False)
-    st.caption("Команды: `/clear` — очистить чат, `/newsid` — новый SessionId`")
 
-# --------------- Helpers ----------------
-def _strip_fences(s: str) -> str:
-    if not isinstance(s, str): return ""
-    s = s.strip()
-    if s.startswith("```"):
-        s = s.lstrip("`")
-        if s.lower().startswith("json"):
-            s = s[4:]
-        s = s.strip("` \n\r\t")
-    return s
+# ================== ПАРСИНГ ОТВЕТА N8N (ИСПРАВЛЕННАЯ ЛОГИКА) ==================
+def parse_n8n_response(response_json: list | dict) -> dict:
+    """
+    Извлекает полезные данные из JSON-ответа от n8n.
+    Ожидаемая структура: [{"output": {"analytical_report": "...", "chart_data": ...}}]
+    """
+    try:
+        # Ответ от n8n часто приходит в виде списка с одним элементом
+        if isinstance(response_json, list) and response_json:
+            data = response_json[0]
+        else:
+            data = response_json
 
-def _first_dict(x):
-    if isinstance(x, dict):
-        return x
-    if isinstance(x, list):
-        for el in x:
-            if isinstance(el, dict):
-                return el
-    return {}
+        # Безопасно извлекаем вложенные данные
+        output_data = data.get('output', {})
+        text = output_data.get('analytical_report', 'Ошибка: не удалось извлечь текстовый отчет из ответа.')
+        chart = output_data.get('chart_data', None)
+        
+        return {"text": text, "chart": chart}
 
-def _extract_payload(obj: dict) -> dict:
-    """Приводим к контракту: {ok, text_response, warnings, errors, sources}."""
-    if isinstance(obj.get("output"), dict):
-        obj = obj["output"]
+    except Exception as e:
+        return {"text": f"Критическая ошибка при парсинге ответа: {e}\nСырой ответ: {str(response_json)}", "chart": None}
 
-    text = obj.get("text_response") or obj.get("text_markdown") or obj.get("text") or ""
-    return {
-        "ok": bool(obj.get("ok", True)),
-        "text_response": _strip_fences(text),
-        "warnings": obj.get("warnings", []) or [],
-        "errors": obj.get("errors", []) or [],
-        "sources": obj.get("sources", []) or [],
-    }
 
-def ask_agent(prompt: str, session_id: str) -> dict:
-    """POST с мягкими ретраями на 429; всегда возвращает словарь."""
-    attempt = 0
-    while True:
-        attempt += 1
-        r = requests.post(
-            url,
-            json={"prompt": prompt, "sessionId": session_id},
-            headers={"x-session-id": session_id},
-            timeout=TIMEOUT,
-        )
-        # ретраи только на 429
-        if r.status_code == 429 and attempt <= MAX_RETRIES:
-            backoff = min(60, (2 ** (attempt - 1)) * 3 + random.randint(0, 2))
-            time.sleep(backoff)
-            continue
-        r.raise_for_status()
+# ================== ОТПРАВКА ЗАПРОСА К АГЕНТУ ==================
+def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
+    """Отправляет POST-запрос к n8n и возвращает обработанный ответ."""
+    headers = {"x-session-id": session_id}
+    payload = {"prompt": prompt, "sessionId": session_id}
 
-        # нормальный JSON
-        try:
-            raw = r.json()
-        except Exception:
-            return {"ok": True, "text_response": r.text, "warnings": [], "errors": []}
-
-        obj = _first_dict(raw)
-        payload = _extract_payload(obj)
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        response.raise_for_status()  # Проверка на ошибки HTTP (4xx, 5xx)
+        
+        raw_response = response.json()
         if debug:
-            st.sidebar.json(raw)
-        return payload
+            st.sidebar.json(raw_response) # Показываем сырой JSON в сайдбаре, если включен debug
+            
+        return parse_n8n_response(raw_response)
 
-# ----------------- State -----------------
-if "sid" not in st.session_state:
-    st.session_state.sid = str(uuid.uuid4())
-if "chat" not in st.session_state:
-    st.session_state.chat = [{"role": "assistant", "content": "Какие данные проанализируем сегодня?"}]
+    except requests.exceptions.ReadTimeout:
+        return {"text": "Ошибка: Время ожидания ответа от сервера истекло.", "chart": None}
+    except requests.exceptions.RequestException as e:
+        return {"text": f"Ошибка подключения к серверу: {e}", "chart": None}
+    except Exception as e:
+        return {"text": f"Неожиданная ошибка: {e}", "chart": None}
 
-# ----------------- History ----------------
-for m in st.session_state.chat:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
 
-# ----------------- Input ------------------
-q = st.chat_input("Ваш вопрос…")
-if q:
-    # команды
-    if q.strip().lower() == "/clear":
-        st.session_state.chat = [{"role": "assistant", "content": "Чат очищен. Чем помочь?"}]
+# ================== UI: БОКОВАЯ ПАНЕЛЬ ==================
+with st.sidebar:
+    st.subheader("Настройки Агента")
+    
+    # Эти поля здесь для имитации UI, как в примере. Они не влияют на логику.
+    st.selectbox("Модель", ["Gemini (через n8n)"], disabled=True)
+    st.text_area(
+        "Системные инструкции", 
+        "Ты — полезный аналитический AI-агент, который анализирует документы и отвечает на вопросы в строгом формате.", 
+        height=100, 
+        disabled=True
+    )
+    st.slider("Температура", 0.0, 1.0, 0.7, disabled=True)
+
+    with st.expander("Дополнительные настройки"):
+        url_input = st.text_input("Webhook URL", value=N8N_URL)
+        debug_mode = st.checkbox("Показывать сырой ответ JSON", value=False)
+        st.caption("Команды в чате: `/clear` для очистки, `/newsid` для новой сессии.")
+
+
+# ================== ИНИЦИАЛИЗАЦИЯ СЕССИИ ЧАТА ==================
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Какие данные проанализируем сегодня?"}]
+
+
+# ================== UI: ОТОБРАЖЕНИЕ ИСТОРИИ ЧАТА ==================
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+
+# ================== UI: ПОЛЕ ВВОДА И ОБРАБОТКА ЗАПРОСА ==================
+if prompt := st.chat_input("Ваш вопрос..."):
+    # Обработка команд
+    if prompt.strip().lower() == "/clear":
+        st.session_state.messages = [{"role": "assistant", "content": "Чат очищен. Чем могу помочь?"}]
         st.rerun()
-    if q.strip().lower() == "/newsid":
-        st.session_state.sid = str(uuid.uuid4())
-        st.session_state.chat.append({"role": "assistant", "content": f"Создан новый SessionId: `{st.session_state.sid}`"})
+    
+    if prompt.strip().lower() == "/newsid":
+        st.session_state.session_id = str(uuid.uuid4())
+        st.session_state.messages.append({"role": "assistant", "content": f"Создана новая сессия: `{st.session_state.session_id}`"})
         st.rerun()
 
-    st.session_state.chat.append({"role": "user", "content": q})
+    # Отображение сообщения пользователя
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Отображение ответа ассистента
     with st.chat_message("assistant"):
-        with st.spinner("Анализирую…"):
-            try:
-                p = ask_agent(q.strip(), st.session_state.sid)
-                text = p.get("text_response") or "_пустой ответ_"
-            except requests.exceptions.ReadTimeout:
-                text = "Таймаут ожидания ответа."
-            except requests.exceptions.RequestException as e:
-                text = f"Ошибка подключения: {e}"
-            except Exception as e:
-                text = f"Неожиданная ошибка: {e}"
-        st.markdown(text)
-    st.session_state.chat.append({"role": "assistant", "content": text})
+        with st.spinner("Анализирую данные..."):
+            response_data = ask_agent(prompt, st.session_state.session_id, url_input, debug_mode)
+            response_text = response_data.get("text") or "_Пустой ответ от агента_"
+            st.markdown(response_text)
+
+    # Сохранение ответа ассистента в историю
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
