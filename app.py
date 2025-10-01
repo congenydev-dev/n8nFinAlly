@@ -2,12 +2,11 @@ import streamlit as st
 import requests
 import uuid
 import time
-import random
+import pandas as pd
 
 # ================== КОНФИГУРАЦИЯ ==================
-# URL вашего вебхука в n8n
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
-TIMEOUT = (10, 120)  # (connect, read) в секундах
+TIMEOUT = (10, 120)
 
 # ================== НАСТРОЙКА СТРАНИЦЫ ==================
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
@@ -15,7 +14,6 @@ st.set_page_config(page_title="Аналитический AI-агент", layout
 
 # ================== ПАРСИНГ ОТВЕТА N8N ==================
 def parse_n8n_response(response_json: list | dict) -> dict:
-    """Извлекает полезные данные из JSON-ответа от n8n."""
     try:
         if isinstance(response_json, list) and response_json:
             data = response_json[0]
@@ -34,7 +32,6 @@ def parse_n8n_response(response_json: list | dict) -> dict:
 
 # ================== ОТПРАВКА ЗАПРОСА К АГЕНТУ ==================
 def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
-    """Отправляет POST-запрос к n8n и возвращает обработанный ответ."""
     headers = {"x-session-id": session_id}
     payload = {"prompt": prompt, "sessionId": session_id}
 
@@ -60,12 +57,7 @@ def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
 with st.sidebar:
     st.subheader("Настройки Агента")
     st.selectbox("Модель", ["Gemini (через n8n)"], disabled=True)
-    st.text_area(
-        "Системные инструкции", 
-        "Ты — полезный аналитический AI-агент...", 
-        height=100, 
-        disabled=True
-    )
+    st.text_area("Системные инструкции", "Ты — полезный аналитический AI-агент...", height=100, disabled=True)
     st.slider("Температура", 0.0, 1.0, 0.7, disabled=True)
 
     with st.expander("Дополнительные настройки"):
@@ -79,45 +71,60 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Какие данные проанализируем сегодня?"}]
+    # <<< ИЗМЕНЕНО ЗДЕСЬ
+    st.session_state.messages = [{"role": "assistant", "content": "Кого будем увольнять сегодня?"}]
 
 
 # ================== UI: ОТОБРАЖЕНИЕ ИСТОРИИ ЧАТА ==================
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if "chart" in message and message["chart"]:
+            try:
+                chart_info = message["chart"]
+                df = pd.DataFrame(chart_info['data'])
+                x_col = chart_info['x_column']
+                y_col = chart_info['y_column']
+
+                if chart_info['type'] == 'bar_chart':
+                    st.bar_chart(df, x=x_col, y=y_col)
+                elif chart_info['type'] == 'line_chart':
+                    st.line_chart(df, x=x_col, y=y_col)
+            except Exception as e:
+                st.error(f"Не удалось построить график: {e}")
 
 
 # ================== UI: ПОЛЕ ВВОДА И ОБРАБОТКА ЗАПРОСА ==================
 if prompt := st.chat_input("Ваш вопрос..."):
-    # Обработка команд
-    if prompt.strip().lower() == "/clear":
-        st.session_state.messages = [{"role": "assistant", "content": "Чат очищен. Чем могу помочь?"}]
-        st.rerun()
-    
-    if prompt.strip().lower() == "/newsid":
-        st.session_state.session_id = str(uuid.uuid4())
-        st.session_state.messages.append({"role": "assistant", "content": f"Создана новая сессия: `{st.session_state.session_id}`"})
-        st.rerun()
-
-    # Добавляем и отображаем сообщение пользователя
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Отображение ответа ассистента (ИЗМЕНЕННАЯ И ИСПРАВЛЕННАЯ ЧАСТЬ)
     with st.chat_message("assistant"):
-        # Создаем пустой контейнер-плейсхолдер
         message_placeholder = st.empty()
-        # Показываем спиннер в плейсхолдере
         message_placeholder.markdown("Анализирую данные...")
         
-        # Получаем ответ от агента
         response_data = ask_agent(prompt, st.session_state.session_id, url_input, debug_mode)
         response_text = response_data.get("text") or "_Пустой ответ от агента_"
+        chart_data = response_data.get("chart")
         
-        # Заменяем спиннер на финальный текст в том же плейсхолдере
         message_placeholder.markdown(response_text)
 
-    # Сохранение финального ответа ассистента в историю
-    st.session_state.messages.append({"role": "assistant", "content": response_text})
+        if chart_data:
+            try:
+                df = pd.DataFrame(chart_data['data'])
+                x_col = chart_data['x_column']
+                y_col = chart_data['y_column']
+
+                if chart_data['type'] == 'bar_chart':
+                    st.bar_chart(df, x=x_col, y=y_col)
+                elif chart_data['type'] == 'line_chart':
+                    st.line_chart(df, x=x_col, y=y_col)
+            except Exception as e:
+                st.error(f"Не удалось построить график: {e}")
+
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": response_text, 
+        "chart": chart_data
+    })
