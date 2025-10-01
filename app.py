@@ -10,24 +10,18 @@ N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af9
 TIMEOUT = (10, 120)  # (connect, read) в секундах
 
 # ================== НАСТРОЙКА СТРАНИЦЫ ==================
-# Используем st.set_page_config() в самом начале
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
 
 
-# ================== ПАРСИНГ ОТВЕТА N8N (ИСПРАВЛЕННАЯ ЛОГИКА) ==================
+# ================== ПАРСИНГ ОТВЕТА N8N ==================
 def parse_n8n_response(response_json: list | dict) -> dict:
-    """
-    Извлекает полезные данные из JSON-ответа от n8n.
-    Ожидаемая структура: [{"output": {"analytical_report": "...", "chart_data": ...}}]
-    """
+    """Извлекает полезные данные из JSON-ответа от n8n."""
     try:
-        # Ответ от n8n часто приходит в виде списка с одним элементом
         if isinstance(response_json, list) and response_json:
             data = response_json[0]
         else:
             data = response_json
 
-        # Безопасно извлекаем вложенные данные
         output_data = data.get('output', {})
         text = output_data.get('analytical_report', 'Ошибка: не удалось извлечь текстовый отчет из ответа.')
         chart = output_data.get('chart_data', None)
@@ -46,11 +40,11 @@ def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
 
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-        response.raise_for_status()  # Проверка на ошибки HTTP (4xx, 5xx)
+        response.raise_for_status()
         
         raw_response = response.json()
         if debug:
-            st.sidebar.json(raw_response) # Показываем сырой JSON в сайдбаре, если включен debug
+            st.sidebar.json(raw_response)
             
         return parse_n8n_response(raw_response)
 
@@ -65,12 +59,10 @@ def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
 # ================== UI: БОКОВАЯ ПАНЕЛЬ ==================
 with st.sidebar:
     st.subheader("Настройки Агента")
-    
-    # Эти поля здесь для имитации UI, как в примере. Они не влияют на логику.
     st.selectbox("Модель", ["Gemini (через n8n)"], disabled=True)
     st.text_area(
         "Системные инструкции", 
-        "Ты — полезный аналитический AI-агент, который анализирует документы и отвечает на вопросы в строгом формате.", 
+        "Ты — полезный аналитический AI-агент...", 
         height=100, 
         disabled=True
     )
@@ -108,17 +100,24 @@ if prompt := st.chat_input("Ваш вопрос..."):
         st.session_state.messages.append({"role": "assistant", "content": f"Создана новая сессия: `{st.session_state.session_id}`"})
         st.rerun()
 
-    # Отображение сообщения пользователя
+    # Добавляем и отображаем сообщение пользователя
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Отображение ответа ассистента
+    # Отображение ответа ассистента (ИЗМЕНЕННАЯ И ИСПРАВЛЕННАЯ ЧАСТЬ)
     with st.chat_message("assistant"):
-        with st.spinner("Анализирую данные..."):
-            response_data = ask_agent(prompt, st.session_state.session_id, url_input, debug_mode)
-            response_text = response_data.get("text") or "_Пустой ответ от агента_"
-            st.markdown(response_text)
+        # Создаем пустой контейнер-плейсхолдер
+        message_placeholder = st.empty()
+        # Показываем спиннер в плейсхолдере
+        message_placeholder.markdown("Анализирую данные...")
+        
+        # Получаем ответ от агента
+        response_data = ask_agent(prompt, st.session_state.session_id, url_input, debug_mode)
+        response_text = response_data.get("text") or "_Пустой ответ от агента_"
+        
+        # Заменяем спиннер на финальный текст в том же плейсхолдере
+        message_placeholder.markdown(response_text)
 
-    # Сохранение ответа ассистента в историю
+    # Сохранение финального ответа ассистента в историю
     st.session_state.messages.append({"role": "assistant", "content": response_text})
