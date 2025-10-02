@@ -80,13 +80,17 @@ for message in st.session_state.messages:
         if "chart" in message and message["chart"]:
             try:
                 chart_info = message["chart"]
-                df = pd.DataFrame(chart_info['data'])
-                df = df.set_index(chart_info['x_column'])
-                
-                if chart_info['type'] == 'bar_chart':
-                    st.bar_chart(df)
-                elif chart_info['type'] == 'line_chart':
-                    st.line_chart(df)
+                # Проверяем, что данные для графика не пустые
+                if chart_info.get('data'):
+                    df = pd.DataFrame(chart_info['data'])
+                    
+                    # ИСПРАВЛЕНО: Явно указываем x и y
+                    if chart_info['type'] == 'bar_chart':
+                        st.bar_chart(df, x=chart_info['x_column'], y=chart_info['y_column'])
+                    elif chart_info['type'] == 'line_chart':
+                        st.line_chart(df, x=chart_info['x_column'], y=chart_info['y_column'])
+                else:
+                    st.warning("Данные для графика отсутствуют в сообщении.")
             except Exception as e:
                 st.error(f"Не удалось построить график из истории: {e}")
 
@@ -109,13 +113,19 @@ if prompt := st.chat_input("Ваш вопрос..."):
 
         if chart_data:
             try:
-                df = pd.DataFrame(chart_data['data'])
-                df = df.set_index(chart_data['x_column'])
-
-                if chart_data['type'] == 'bar_chart':
-                    st.bar_chart(df)
-                elif chart_data['type'] == 'line_chart':
-                    st.line_chart(df)
+                # Проверяем, что данные для графика не пустые
+                if chart_data.get('data'):
+                    df = pd.DataFrame(chart_data['data'])
+                    
+                    # ИСПРАВЛЕНО: Явно указываем x и y
+                    if chart_data['type'] == 'bar_chart':
+                        st.bar_chart(df, x=chart_data['x_column'], y=chart_data['y_column'])
+                    elif chart_data['type'] == 'line_chart':
+                        st.line_chart(df, x=chart_data['x_column'], y=chart_data['y_column'])
+                else:
+                    st.warning("Агент вернул команду на построение графика, но не предоставил данные.")
+            except KeyError as e:
+                st.error(f"Ошибка в структуре данных для графика: отсутствует ключ {e}. Проверьте JSON от n8n.")
             except Exception as e:
                 st.error(f"Не удалось построить новый график: {e}")
 
