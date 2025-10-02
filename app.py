@@ -47,27 +47,17 @@ def display_chart(chart_info):
                 st.error("Ошибка в структуре данных для графика.")
                 return
 
-            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
-
-            # 1. Очищаем Y-колонку, как и раньше (это работает правильно)
             df[y_col] = df[y_col].astype(str).str.replace(' ', '', regex=False).str.replace(',', '.', regex=False)
             df[y_col] = pd.to_numeric(df[y_col], errors='coerce')
             df.dropna(subset=[y_col], inplace=True)
 
             if not df.empty:
-                # 2. Устанавливаем колонку X в качестве индекса DataFrame
                 df = df.set_index(x_col)
-
-                # 3. Вызываем st.bar_chart, передавая ему DataFrame, 
-                #    где X - это индекс, а Y - это колонка с данными.
                 chart_type = chart_info.get('type')
                 if chart_type == 'bar_chart':
-                    st.bar_chart(df[[y_col]]) # Передаем только Y-колонку для отрисовки
+                    st.bar_chart(df[[y_col]])
                 elif chart_type == 'line_chart':
-                    st.line_chart(df[[y_col]]) # Аналогично для линейного графика
-            
-            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-            
+                    st.line_chart(df[[y_col]])
             else:
                 st.warning("Данные для графика оказались пустыми после очистки.")
     except Exception as e:
@@ -76,6 +66,7 @@ def display_chart(chart_info):
 # ================== UI БОКОВАЯ ПАНЕЛЬ ==================
 with st.sidebar:
     st.subheader("Настройки Агента")
+    # ... (остальной код боковой панели без изменений) ...
     st.selectbox("Модель", ["Gemini (через n8n)"], disabled=True)
     st.text_area("Системные инструкции", "Ты — полезный аналитический AI-агент...", height=100, disabled=True)
     st.slider("Температура", 0.0, 1.0, 0.7, disabled=True)
@@ -104,14 +95,20 @@ if prompt := st.chat_input("Ваш вопрос..."):
         st.chat_message("user").markdown(prompt)
 
         with st.chat_message("assistant"):
+            # --- НАЧАЛО ИСПРАВЛЕННОГО БЛОКА ---
+            # Используем st.spinner для отображения сообщения о загрузке.
+            # Это надежнее, чем st.empty().
             with st.spinner("Анализирую данные..."):
                 response_data = ask_agent(prompt, st.session_state.get("session_id", "default"), url_input, debug_mode)
             
+            # После завершения spinner'а, просто выводим результаты.
             response_text = response_data.get("text", "_Пустой ответ от агента_")
             chart_data = response_data.get("chart")
 
             st.markdown(response_text)
             if chart_data:
                 display_chart(chart_data)
+            # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
 
+        # Добавляем полное сообщение в историю для будущих перерисовок
         st.session_state.messages.append({"role": "assistant", "content": response_text, "chart": chart_data})
