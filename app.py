@@ -47,19 +47,27 @@ def display_chart(chart_info):
                 st.error("Ошибка в структуре данных для графика.")
                 return
 
-            # Очистка данных
+            # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+
+            # 1. Очищаем Y-колонку, как и раньше (это работает правильно)
             df[y_col] = df[y_col].astype(str).str.replace(' ', '', regex=False).str.replace(',', '.', regex=False)
             df[y_col] = pd.to_numeric(df[y_col], errors='coerce')
             df.dropna(subset=[y_col], inplace=True)
 
             if not df.empty:
+                # 2. Устанавливаем колонку X в качестве индекса DataFrame
+                df = df.set_index(x_col)
+
+                # 3. Вызываем st.bar_chart, передавая ему DataFrame, 
+                #    где X - это индекс, а Y - это колонка с данными.
                 chart_type = chart_info.get('type')
                 if chart_type == 'bar_chart':
-                    st.bar_chart(df, x=x_col, y=y_col)
+                    st.bar_chart(df[[y_col]]) # Передаем только Y-колонку для отрисовки
                 elif chart_type == 'line_chart':
-                    st.line_chart(df, x=x_col, y=y_col)
-                else:
-                    st.warning(f"Неизвестный тип графика: {chart_type}")
+                    st.line_chart(df[[y_col]]) # Аналогично для линейного графика
+            
+            # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+            
             else:
                 st.warning("Данные для графика оказались пустыми после очистки.")
     except Exception as e:
