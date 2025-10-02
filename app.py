@@ -78,22 +78,43 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "chart" in message and message["chart"]:
+            # --- НАЧАЛО ЗАМЕНЕННОГО БЛОКА 1 ---
             try:
                 chart_info = message["chart"]
-                # Проверяем, что данные для графика не пустые
-                if chart_info.get('data'):
+                if chart_info and chart_info.get('data'):
                     df = pd.DataFrame(chart_info['data'])
                     
-                    # ИСПРАВЛЕНО: Явно указываем x и y
-                    if chart_info['type'] == 'bar_chart':
-                        st.bar_chart(df, x=chart_info['x_column'], y=chart_info['y_column'])
-                    elif chart_info['type'] == 'line_chart':
-                        st.line_chart(df, x=chart_info['x_column'], y=chart_info['y_column'])
-                else:
-                    st.warning("Данные для графика отсутствуют в сообщении.")
+                    x_col = chart_info.get('x_column')
+                    y_col = chart_info.get('y_column')
+
+                    if not x_col or not y_col:
+                        st.error("Ошибка в данных: не указаны имена колонок для осей X и Y.")
+                    elif y_col not in df.columns or x_col not in df.columns:
+                        st.error(f"Ошибка данных: колонка '{y_col}' или '{x_col}' не найдена.")
+                    else:
+                        # --- БЛОК ОЧИСТКИ ДАННЫХ ---
+                        # 1. Превращаем Y-колонку в строку, чтобы применить текстовые функции
+                        clean_series = df[y_col].astype(str)
+                        # 2. Убираем все пробелы (например, из "178 970")
+                        clean_series = clean_series.str.replace(' ', '', regex=False)
+                        # 3. Заменяем запятые на точки для правильной конвертации в число
+                        clean_series = clean_series.str.replace(',', '.', regex=False)
+                        # 4. Конвертируем очищенную строку в число. Ошибки станут 'NaN'
+                        df[y_col] = pd.to_numeric(clean_series, errors='coerce')
+                        
+                        # Удаляем строки, где конвертация не удалась
+                        df.dropna(subset=[y_col], inplace=True)
+
+                        if not df.empty:
+                            if chart_info['type'] == 'bar_chart':
+                                st.bar_chart(df, x=x_col, y=y_col)
+                            elif chart_info['type'] == 'line_chart':
+                                st.line_chart(df, x=x_col, y=y_col)
+                        else:
+                            st.warning("Не удалось построить график: данные не содержат корректных чисел.")
             except Exception as e:
                 st.error(f"Не удалось построить график из истории: {e}")
-
+            # --- КОНЕЦ ЗАМЕНЕННОГО БЛОКА 1 ---
 
 # ================== UI: ПОЛЕ ВВОДА И ОБРАБОТКА ЗАПРОСА ==================
 if prompt := st.chat_input("Ваш вопрос..."):
@@ -112,22 +133,42 @@ if prompt := st.chat_input("Ваш вопрос..."):
         message_placeholder.markdown(response_text)
 
         if chart_data:
+            # --- НАЧАЛО ЗАМЕНЕННОГО БЛОКА 2 ---
             try:
-                # Проверяем, что данные для графика не пустые
-                if chart_data.get('data'):
+                if chart_data and chart_data.get('data'):
                     df = pd.DataFrame(chart_data['data'])
                     
-                    # ИСПРАВЛЕНО: Явно указываем x и y
-                    if chart_data['type'] == 'bar_chart':
-                        st.bar_chart(df, x=chart_data['x_column'], y=chart_data['y_column'])
-                    elif chart_data['type'] == 'line_chart':
-                        st.line_chart(df, x=chart_data['x_column'], y=chart_data['y_column'])
-                else:
-                    st.warning("Агент вернул команду на построение графика, но не предоставил данные.")
-            except KeyError as e:
-                st.error(f"Ошибка в структуре данных для графика: отсутствует ключ {e}. Проверьте JSON от n8n.")
+                    x_col = chart_data.get('x_column')
+                    y_col = chart_data.get('y_column')
+
+                    if not x_col or not y_col:
+                        st.error("Ошибка в данных от агента: не указаны имена колонок для осей X и Y.")
+                    elif y_col not in df.columns or x_col not in df.columns:
+                        st.error(f"Ошибка данных: колонка '{y_col}' или '{x_col}' не найдена в ответе агента.")
+                    else:
+                        # --- БЛОК ОЧИСТКИ ДАННЫХ ---
+                        # 1. Превращаем Y-колонку в строку, чтобы применить текстовые функции
+                        clean_series = df[y_col].astype(str)
+                        # 2. Убираем все пробелы (например, из "178 970")
+                        clean_series = clean_series.str.replace(' ', '', regex=False)
+                        # 3. Заменяем запятые на точки для правильной конвертации в число
+                        clean_series = clean_series.str.replace(',', '.', regex=False)
+                        # 4. Конвертируем очищенную строку в число. Ошибки станут 'NaN'
+                        df[y_col] = pd.to_numeric(clean_series, errors='coerce')
+                        
+                        # Удаляем строки, где конвертация не удалась
+                        df.dropna(subset=[y_col], inplace=True)
+
+                        if not df.empty:
+                            if chart_data['type'] == 'bar_chart':
+                                st.bar_chart(df, x=x_col, y=y_col)
+                            elif chart_data['type'] == 'line_chart':
+                                st.line_chart(df, x=x_col, y=y_col)
+                        else:
+                            st.warning("Не удалось построить график: данные от агента не содержат корректных чисел.")
             except Exception as e:
                 st.error(f"Не удалось построить новый график: {e}")
+            # --- КОНЕЦ ЗАМЕНЕННОГО БЛОКА 2 ---
 
     st.session_state.messages.append({
         "role": "assistant", 
