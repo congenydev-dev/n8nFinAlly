@@ -3,29 +3,21 @@ import requests
 import uuid
 import pandas as pd
 
-# ================== КОНФИГ ==================
+# ========= КОНФИГ =========
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
+TIMEOUT = (10, 240)  # connect=10s, read=240s (4 минуты)
 
-# ================== СТРАНИЦА ==================
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
 
-# ================== СЕССИЯ ==================
-ss = st.session_state
-if "session_id" not in ss:
-    ss.session_id = str(uuid.uuid4())
-if "messages" not in ss:
-    ss.messages = [{"role": "assistant", "content": "Кого будем увольнять сегодня?"}]
-if "debug_mode" not in ss:
-    ss.debug_mode = False
-if "pending" not in ss:
-    ss.pending = False
-if "pending_prompt" not in ss:
-    ss.pending_prompt = ""
-if "fetch_in_progress" not in ss:
-    ss.fetch_in_progress = False
+# ========= СЕССИЯ =========
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Кого будем увольнять сегодня?"}]
 
-# ================== УТИЛИТЫ ==================
+# ========= УТИЛИТЫ =========
 def parse_n8n_response(response_json):
+    """Ожидаем {'output': {'analytical_report': str, 'chart_data': null|{...}}}"""
     try:
         data = response_json[0] if isinstance(response_json, list) and response_json else response_json
         out = data.get("output", {}) if isinstance(data, dict) else {}
@@ -35,17 +27,13 @@ def parse_n8n_response(response_json):
     except Exception as e:
         return {"text": f"Критическая ошибка парсинга: {e}\nСырой ответ: {response_json}", "chart": None}
 
-def ask_agent(prompt: str, session_id: str, url: str, debug: bool, read_timeout: int) -> dict:
-    headers = {"x-session-id": session_id}
-    payload = {"prompt": prompt, "sessionId": session_id}
+def ask_agent(prompt: str) -> dict:
+    headers = {"x-session-id": st.session_state.session_id}
+    payload = {"prompt": prompt, "sessionId": st.session_state.session_id}
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=(10, read_timeout))
+        r = requests.post(N8N_URL, json=payload, headers=headers, timeout=TIMEOUT)
         r.raise_for_status()
-        raw = r.json()
-        if debug:
-            st.sidebar.subheader("Сырой ответ JSON")
-            st.sidebar.json(raw)
-        return parse_n8n_response(raw)
+        return parse_n8n_response(r.json())
     except requests.exceptions.RequestException as e:
         return {"text": f"Ошибка подключения/таймаута: {e}", "chart": None}
     except Exception as e:
@@ -54,143 +42,70 @@ def ask_agent(prompt: str, session_id: str, url: str, debug: bool, read_timeout:
 def _to_numeric_series(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
-         .str.replace("\u00A0", "", regex=False)   # NBSP
+         .str.replace("\u00A0", "", regex=False)  # NBSP
          .str.replace("%", "", regex=False)
          .str.replace(" ", "", regex=False)
          .str.replace(",", ".", regex=False)
          .pipe(pd.to_numeric, errors="coerce")
     )
 
-def display_chart_streamlit(spec, debug: bool = False):
-    """Только bar_chart и line_chart — нативные st.bar_chart/st.line_chart."""
-    try:
-        if not spec:
-            return
-        data = spec.get("data")
-        x_col = spec.get("x_column")
-        y_col = spec.get("y_column")
-        chart_type = (spec.get("type") or "bar_chart").lower()
+def show_chart(spec: dict):
+    """Только bar_chart и line_chart (нативный Streamlit)."""
+    if not spec:
+        return
+    data = spec.get("data")
+    x_col = spec.get("x_column")
+    y_col = spec.get("y_column")
+    chart_type = (spec.get("type") or "bar_chart").lower()
 
-        if not (data and x_col and y_col):
-            st.error("Ошибка: неполная структура chart_data (ожидаю data/x_column/y_column).")
-            return
+    if not (data and x_col and y_col):
+        st.error("chart_data неполный (нужны data/x_column/y_column).")
+        return
 
-        df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
-        if x_col not in df.columns or y_col not in df.columns:
-            st.error("Ошибка: указанные колонки для графика не найдены в данных.")
-            return
+    df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
+    if x_col not in df.columns or y_col not in df.columns:
+        st.error("Указанные колонки для графика не найдены в данных.")
+        return
 
-        df[y_col] = _to_numeric_series(df[y_col])
-        df = df.dropna(subset=[y_col])
-        if df.empty:
-            st.warning("Данные для графика пустые после очистки.")
-            return
+    df[y_col] = _to_numeric_series(df[y_col])
+    df = df.dropna(subset=[y_col])
+    if df.empty:
+        st.warning("Данные для графика пустые после очистки.")
+        return
 
-        common = dict(x=x_col, y=y_col, use_container_width=True, height=420, sort=False)
-        if chart_type == "line_chart":
-            st.line_chart(df[[x_col, y_col]], **common)
-        else:
-            st.bar_chart(
-                df[[x_col, y_col]],
-                **common,
-                horizontal=bool(spec.get("horizontal", False)),
-                stack=spec.get("stack", None),
-            )
-
-        if debug:
-            with st.expander("Данные графика"):
-                st.dataframe(df)
-    except Exception as e:
-        st.error(f"Не удалось построить график: {e}")
-
-# ================== САЙДБАР ==================
-with st.sidebar:
-    st.subheader("Настройки Агента")
-    st.selectbox("Модель", ["Gemini (через n8n)"], disabled=True)
-    st.text_area("Системные инструкции", "Ты — полезный аналитический AI-агент...", height=100, disabled=True)
-    st.slider("Температура", 0.0, 1.0, 0.7, disabled=True)
-
-    with st.expander("Дополнительные настройки", expanded=False):
-        url_input = st.text_input("Webhook URL", value=N8N_URL)
-        ss.debug_mode = st.checkbox("Показывать сырой ответ JSON", value=ss.debug_mode)
-        read_timeout = st.slider("Таймаут ответа (сек)", 30, 240, 180, step=10)
-        st.caption(f"Timeout: connect=10s • read={read_timeout}s")
-        st.caption("Команды: `/clear` — очистка истории.")
-
-    # мини-диагностика истории
-    st.write("Msgs:", len(ss.messages))
-    try:
-        st.json(ss.messages[-3:])
-    except Exception:
-        pass
-
-    st.caption(f"Session: {ss.session_id}")
-
-    if ss.pending and st.button("⛔ Отменить запрос"):
-        ss.pending = False
-        ss.pending_prompt = ""
-        if ss.messages and ss.messages[-1].get("pending"):
-            ss.messages[-1] = {"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None}
-        else:
-            ss.messages.append({"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None})
-        st.rerun()
-
-    if st.button("🧹 Новый чат / очистить всё"):
-        ss.session_id = str(uuid.uuid4())
-        ss.messages = [{"role": "assistant", "content": "История чата очищена."}]
-        ss.pending = False
-        ss.pending_prompt = ""
-        try:
-            st.cache_data.clear(); st.cache_resource.clear()
-        except Exception:
-            pass
-        st.rerun()
-
-# ================== LAZY FETCH (без «тени») ==================
-if ss.pending and ss.pending_prompt and not ss.fetch_in_progress:
-    ss.fetch_in_progress = True
-    try:
-        resp = ask_agent(ss.pending_prompt, ss.session_id, url_input, ss.debug_mode, read_timeout)
-        text = resp.get("text", "_Пустой ответ от агента_")
-        chart = resp.get("chart")
-        # Заменяем pending-плейсхолдер на реальный ответ
-        if ss.messages and ss.messages[-1].get("pending"):
-            ss.messages[-1] = {"role": "assistant", "content": text, "chart": chart}
-        else:
-            ss.messages.append({"role": "assistant", "content": text, "chart": chart})
-    except Exception as e:
-        if ss.messages and ss.messages[-1].get("pending"):
-            ss.messages[-1] = {"role": "assistant", "content": f"Ошибка запроса: {e}", "chart": None}
-        else:
-            ss.messages.append({"role": "assistant", "content": f"Ошибка запроса: {e}", "chart": None})
-    finally:
-        ss.pending = False
-        ss.pending_prompt = ""
-        ss.fetch_in_progress = False
-        st.rerun()
-
-# ================== РЕНДЕР ИСТОРИИ ==================
-for msg in ss.messages:
-    with st.chat_message(msg["role"]):
-        if msg.get("pending"):
-            st.caption("… Анализирую данные …")  # без spinner, чтобы не было «затемнения»
-        else:
-            st.markdown(msg["content"])
-            if msg.get("chart"):
-                display_chart_streamlit(msg["chart"], debug=ss.debug_mode)
-
-# ================== ВВОД ПОЛЬЗОВАТЕЛЯ ==================
-prompt = st.chat_input("Ваш вопрос...")
-if prompt:
-    if prompt.strip() == "/clear":
-        ss.messages = [{"role": "assistant", "content": "История чата очищена."}]
-        ss.pending = False
-        ss.pending_prompt = ""
-        st.rerun()
+    common = dict(x=x_col, y=y_col, use_container_width=True, height=420, sort=False)
+    if chart_type == "line_chart":
+        st.line_chart(df[[x_col, y_col]], **common)
     else:
-        ss.messages.append({"role": "user", "content": prompt})
-        # pending-плейсхолдер — одно «ожидающее» сообщение
-        ss.messages.append({"role": "assistant", "content": "", "pending": True})
-        ss.pending = True
-        ss.pending_prompt = prompt
-        st.rerun()
+        st.bar_chart(
+            df[[x_col, y_col]],
+            **common,
+            horizontal=bool(spec.get("horizontal", False)),
+            stack=spec.get("stack", None),
+        )
+
+# ========= РЕНДЕР ИСТОРИИ =========
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("chart"):
+            show_chart(msg["chart"])
+
+# ========= ВВОД ПОЛЬЗОВАТЕЛЯ =========
+if prompt := st.chat_input("Ваш вопрос..."):
+    # 1) Пишем пользователя в историю и рисуем его сообщение
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # 2) Синхронно спрашиваем n8n (до 4 минут, без спиннеров)
+    resp = ask_agent(prompt)
+    text = resp.get("text", "_Пустой ответ от агента_")
+    chart = resp.get("chart")
+
+    # 3) Рисуем ответ и добавляем его в историю
+    with st.chat_message("assistant"):
+        st.markdown(text)
+        if chart:
+            show_chart(chart)
+    st.session_state.messages.append({"role": "assistant", "content": text, "chart": chart})
