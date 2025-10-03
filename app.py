@@ -7,13 +7,13 @@ import pandas as pd
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
 TIMEOUT = (10, 240)  # connect=10s, read=240s (4 минуты)
 
-st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
+st.set_page_config(page_title="Analitical Agent", layout="wide")
 
 # ========= СЕССИЯ =========
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Кого будем увольнять сегодня?"}]
+    st.session_state.messages = [{"role": "assistant", "content": "Whom are we firing today?"}]
 
 # ========= УТИЛИТЫ =========
 def parse_n8n_response(response_json):
