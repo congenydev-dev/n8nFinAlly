@@ -2,11 +2,10 @@ import streamlit as st
 import requests
 import uuid
 import pandas as pd
-import plotly.express as px
 
 # ================== КОНФИГ ==================
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
-TIMEOUT = (10, 25)  # (connect, read) — короче, чтобы UI не "замирал"
+TIMEOUT = (10, 25)  # (connect, read) — чтобы UI не "замирал"
 
 # ================== СТРАНИЦА ==================
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
@@ -28,7 +27,6 @@ if "fetch_in_progress" not in ss:
 
 # ================== УТИЛИТЫ ==================
 def parse_n8n_response(response_json):
-    """Ждём контракт: {'output': {'analytical_report': str, 'chart_data': null|{...}}}"""
     try:
         data = response_json[0] if isinstance(response_json, list) and response_json else response_json
         out = data.get("output", {}) if isinstance(data, dict) else {}
@@ -54,8 +52,18 @@ def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
     except Exception as e:
         return {"text": f"Неожиданная ошибка: {e}", "chart": None}
 
-def display_chart(spec, debug: bool = False):
-    """Рендер только bar_chart и line_chart (PoC)."""
+def _to_numeric_series(s: pd.Series) -> pd.Series:
+    return (
+        s.astype(str)
+         .str.replace("\u00A0", "", regex=False)   # NBSP
+         .str.replace("%", "", regex=False)
+         .str.replace(" ", "", regex=False)
+         .str.replace(",", ".", regex=False)
+         .pipe(pd.to_numeric, errors="coerce")
+    )
+
+def display_chart_streamlit(spec, debug: bool = False):
+    """Только bar_chart и line_chart. Нативные st.bar_chart/st.line_chart."""
     try:
         if not spec:
             return
@@ -68,50 +76,33 @@ def display_chart(spec, debug: bool = False):
             st.error("Ошибка: неполная структура chart_data (ожидаю data/x_column/y_column).")
             return
 
-        # data: list[dict] или dict -> DataFrame
         df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
-
-        # приводим Y к числу
-        if y_col not in df.columns or x_col not in df.columns:
+        if x_col not in df.columns or y_col not in df.columns:
             st.error("Ошибка: указанные колонки для графика не найдены в данных.")
             return
 
-        df[y_col] = (
-            df[y_col]
-            .astype(str)
-            .str.replace("\u00A0", "", regex=False)  # NBSP
-            .str.replace("%", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.replace(",", ".", regex=False)
-        )
-        df[y_col] = pd.to_numeric(df[y_col], errors="coerce")
+        df[y_col] = _to_numeric_series(df[y_col])
         df = df.dropna(subset=[y_col])
         if df.empty:
             st.warning("Данные для графика пустые после очистки.")
             return
 
-        category_order = df[x_col].tolist()
-
+        common = dict(x=x_col, y=y_col, use_container_width=True, height=420, sort=False)
         if chart_type == "line_chart":
-            fig = px.line(df, x=x_col, y=y_col, markers=True)
-        else:  # bar_chart по умолчанию
-            fig = px.bar(df, x=x_col, y=y_col)
-
-        fig.update_layout(
-            height=420,
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(categoryorder="array", categoryarray=category_order),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            st.line_chart(df[[x_col, y_col]], **common)
+        else:
+            st.bar_chart(
+                df[[x_col, y_col]],
+                **common,
+                horizontal=bool(spec.get("horizontal", False)),
+                stack=spec.get("stack", None),
+            )
 
         if debug:
             with st.expander("Данные графика"):
                 st.dataframe(df)
     except Exception as e:
         st.error(f"Не удалось построить график: {e}")
-
-def append_assistant(text: str, chart):
-    ss.messages.append({"role": "assistant", "content": text, "chart": chart})
 
 # ================== САЙДБАР ==================
 with st.sidebar:
@@ -130,7 +121,11 @@ with st.sidebar:
         if st.button("⛔ Отменить запрос"):
             ss.pending = False
             ss.pending_prompt = ""
-            append_assistant("Запрос отменён пользователем.", None)
+            # Заменим «ожидающий» месседж, если он есть
+            if ss.messages and ss.messages[-1].get("pending"):
+                ss.messages[-1] = {"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None}
+            else:
+                ss.messages.append({"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None})
             st.rerun()
 
     if st.button("🧹 Новый чат / очистить всё"):
@@ -139,22 +134,28 @@ with st.sidebar:
         ss.pending = False
         ss.pending_prompt = ""
         try:
-            st.cache_data.clear()
-            st.cache_resource.clear()
+            st.cache_data.clear(); st.cache_resource.clear()
         except Exception:
             pass
         st.rerun()
 
-# ================== LAZY FETCH (без «тени», устойчивый) ==================
+# ================== LAZY FETCH (без «тени»: только история) ==================
 if ss.pending and ss.pending_prompt and not ss.fetch_in_progress:
     ss.fetch_in_progress = True
     try:
-        with st.chat_message("assistant"):
-            with st.spinner("Анализирую данные..."):
-                resp = ask_agent(ss.pending_prompt, ss.session_id, url_input, ss.debug_mode)
-        append_assistant(resp.get("text", "_Пустой ответ от агента_"), resp.get("chart"))
+        resp = ask_agent(ss.pending_prompt, ss.session_id, url_input, ss.debug_mode)
+        text = resp.get("text", "_Пустой ответ от агента_")
+        chart = resp.get("chart")
+        # ВАЖНО: заменяем последнюю «ожидающую» запись, а не добавляем новую
+        if ss.messages and ss.messages[-1].get("pending"):
+            ss.messages[-1] = {"role": "assistant", "content": text, "chart": chart}
+        else:
+            ss.messages.append({"role": "assistant", "content": text, "chart": chart})
     except Exception as e:
-        append_assistant(f"Ошибка запроса: {e}", None)
+        if ss.messages and ss.messages[-1].get("pending"):
+            ss.messages[-1] = {"role": "assistant", "content": f"Ошибка запроса: {e}", "chart": None}
+        else:
+            ss.messages.append({"role": "assistant", "content": f"Ошибка запроса: {e}", "chart": None})
     finally:
         ss.pending = False
         ss.pending_prompt = ""
@@ -164,9 +165,15 @@ if ss.pending and ss.pending_prompt and not ss.fetch_in_progress:
 # ================== РЕНДЕР ИСТОРИИ ==================
 for msg in ss.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg.get("chart"):
-            display_chart(msg["chart"], debug=ss.debug_mode)
+        if msg.get("pending"):
+            # ОДНО "ожидающее" сообщение — без реального контента (никаких дублей)
+            st.write("… Анализирую данные …")
+            with st.spinner(""):
+                pass
+        else:
+            st.markdown(msg["content"])
+            if msg.get("chart"):
+                display_chart_streamlit(msg["chart"], debug=ss.debug_mode)
 
 # ================== ВВОД ПОЛЬЗОВАТЕЛЯ ==================
 prompt = st.chat_input("Ваш вопрос...")
@@ -177,7 +184,11 @@ if prompt:
         ss.pending_prompt = ""
         st.rerun()
     else:
+        # 1) записываем пользователя
         ss.messages.append({"role": "user", "content": prompt})
+        # 2) добавляем ПЛЕЙСХОЛДЕР ассистента (pending=True)
+        ss.messages.append({"role": "assistant", "content": "", "pending": True})
+        # 3) запускаем фетч
         ss.pending = True
         ss.pending_prompt = prompt
         st.rerun()
