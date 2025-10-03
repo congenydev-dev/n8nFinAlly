@@ -15,6 +15,8 @@ st.set_page_config(page_title="Аналитический AI-агент", layout
 # ================== СЕССИЯ ==================
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Кого будем увольнять сегодня?"}]
 
 # ================== ФУНКЦИИ ==================
 def parse_n8n_response(response_json: list | dict) -> dict:
@@ -49,7 +51,8 @@ def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
         return {"text": f"Неожиданная ошибка: {e}", "chart": None}
 
 def display_chart(chart_info, debug: bool = False):
-    """Рендер графика через Plotly, устойчив к категориальной X и разным форматам данных."""
+    """Рендер одного графика через Plotly. Поддержка типов:
+       bar_chart, line_chart, area_chart, scatter, pie, histogram, box."""
     try:
         if not chart_info:
             return
@@ -57,53 +60,90 @@ def display_chart(chart_info, debug: bool = False):
         data = chart_info.get("data")
         x_col = chart_info.get("x_column")
         y_col = chart_info.get("y_column")
-        chart_type = (chart_info.get("type") or "").lower()
+        chart_type = (chart_info.get("type") or "bar_chart").lower()
 
         if not (data and x_col and y_col):
             st.error("Ошибка: неполная структура chart_data (ожидаю data/x_column/y_column).")
             return
 
         # data может быть list[dict] или dict
-        if isinstance(data, dict):
-            df = pd.DataFrame([data])
-        else:
-            df = pd.DataFrame(data)
+        df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
 
-        if x_col not in df.columns or y_col not in df.columns:
-            st.error("Ошибка: указанные колонки для графика не найдены в данных.")
-            return
+        # y_column: строка или список строк (на будущее для мультисерий)
+        y_cols = [y_col] if isinstance(y_col, str) else list(y_col)
 
-        # Чистим и приводим Y к числу
-        df[y_col] = (
-            df[y_col].astype(str)
-            .str.replace(" ", "", regex=False)
-            .str.replace(",", ".", regex=False)
-        )
-        df[y_col] = pd.to_numeric(df[y_col], errors="coerce")
-        df = df.dropna(subset=[y_col])
+        # привести числовые столбцы (только Y) к числу
+        for yc in y_cols:
+            if yc in df.columns:
+                df[yc] = (
+                    df[yc].astype(str)
+                    .str.replace("\u00A0", "", regex=False)  # NBSP
+                    .str.replace("%", "", regex=False)
+                    .str.replace(" ", "", regex=False)
+                    .str.replace(",", ".", regex=False)
+                )
+                df[yc] = pd.to_numeric(df[yc], errors="coerce")
 
-        if df.empty:
-            st.warning("Данные для графика пустые после очистки.")
-            return
+        # порядок категорий как в данных
+        category_order = df[x_col].tolist() if x_col in df.columns else None
 
-        # Сохраняем порядок категорий как в данных
-        category_order = df[x_col].tolist()
-
+        # === отрисовка по типу ===
         if chart_type == "line_chart":
-            fig = px.line(df, x=x_col, y=y_col, markers=True)
-        else:  # по умолчанию столбчатая
-            fig = px.bar(df, x=x_col, y=y_col)
+            if len(y_cols) == 1:
+                fig = px.line(df, x=x_col, y=y_cols[0], markers=True)
+            else:
+                long_df = df[[x_col] + [c for c in y_cols if c in df.columns]].melt(
+                    id_vars=[x_col], var_name="series", value_name="value"
+                )
+                fig = px.line(long_df, x=x_col, y="value", color="series", markers=True)
+
+        elif chart_type == "area_chart":
+            if len(y_cols) == 1:
+                fig = px.area(df, x=x_col, y=y_cols[0])
+            else:
+                long_df = df[[x_col] + [c for c in y_cols if c in df.columns]].melt(
+                    id_vars=[x_col], var_name="series", value_name="value"
+                )
+                fig = px.area(long_df, x=x_col, y="value", color="series")
+
+        elif chart_type == "scatter":
+            yc = y_cols[0]
+            fig = px.scatter(df, x=x_col, y=yc)
+
+        elif chart_type == "pie":
+            yc = y_cols[0]
+            fig = px.pie(df, names=x_col, values=yc, hole=0.0)
+
+        elif chart_type == "histogram":
+            yc = y_cols[0]
+            fig = px.histogram(df, x=yc)
+
+        elif chart_type == "box":
+            yc = y_cols[0]
+            if x_col in df.columns:
+                fig = px.box(df, x=x_col, y=yc)
+            else:
+                fig = px.box(df, y=yc)
+
+        else:  # bar_chart по умолчанию
+            if len(y_cols) == 1:
+                fig = px.bar(df, x=x_col, y=y_cols[0])
+            else:
+                long_df = df[[x_col] + [c for c in y_cols if c in df.columns]].melt(
+                    id_vars=[x_col], var_name="series", value_name="value"
+                )
+                barmode = "stack" if chart_info.get("stacked") else "group"
+                fig = px.bar(long_df, x=x_col, y="value", color="series", barmode=barmode)
 
         fig.update_layout(
             height=420,
             margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(categoryorder="array", categoryarray=category_order),
+            xaxis=dict(categoryorder="array", categoryarray=category_order) if category_order else dict(),
         )
-
         st.plotly_chart(fig, use_container_width=True)
 
         if debug:
-            with st.expander("Данные, переданные в график"):
+            with st.expander("Данные графика"):
                 st.dataframe(df)
     except Exception as e:
         st.error(f"Не удалось построить график: {e}")
@@ -124,53 +164,52 @@ with st.sidebar:
 
     # === КНОПКА ПОЛНОЙ ОЧИСТКИ СЕССИИ ===
     if st.button("🧹 Новый чат / очистить всё"):
-        st.session_state.session_id = str(uuid.uuid4())  # новый поток на стороне n8n
+        st.session_state.session_id = str(uuid.uuid4())
         st.session_state.messages = [{"role": "assistant", "content": "История чата очищена."}]
         try:
             st.cache_data.clear()
             st.cache_resource.clear()
         except Exception:
             pass
-        st.rerun()  # мгновенный перезапуск (без F5)
+        st.rerun()
 
-# ================== ИНИЦИАЛИЗАЦИЯ И ИСТОРИЯ ЧАТА ==================
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Кого будем увольнять сегодня?"}]
+# ================== LAZY FETCH ОТВЕТА (чтобы не было «тени») ==================
+def need_reply() -> bool:
+    if not st.session_state.messages:
+        return False
+    return st.session_state.messages[-1]["role"] == "user"
 
+if need_reply():
+    with st.chat_message("assistant"):
+        with st.spinner("Анализирую данные..."):
+            last_user_prompt = st.session_state.messages[-1]["content"]
+            response_data = ask_agent(
+                last_user_prompt,
+                st.session_state.session_id,
+                url_input,
+                debug_mode,
+            )
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": response_data.get("text", "_Пустой ответ от агента_"),
+        "chart": response_data.get("chart")
+    })
+    st.rerun()
+
+# ================== РЕНДЕР ИСТОРИИ ==================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        if "chart" in msg and msg.get("chart"):
+        if msg.get("chart"):
             display_chart(msg["chart"], debug=debug_mode)
 
 # ================== ОБРАБОТКА НОВОГО ЗАПРОСА ==================
-if prompt := st.chat_input("Ваш вопрос..."):
+prompt = st.chat_input("Ваш вопрос...")
+if prompt:
     if prompt.strip() == "/clear":
         st.session_state.messages = [{"role": "assistant", "content": "История чата очищена."}]
         st.rerun()
     else:
+        # Только записываем пользователя и моментально перерисовываем — ответ подтянется в lazy fetch
         st.session_state.messages.append({"role": "user", "content": prompt})
-        st.chat_message("user").markdown(prompt)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Анализирую данные..."):
-                response_data = ask_agent(
-                    prompt,
-                    st.session_state.session_id,
-                    url_input,
-                    debug_mode
-                )
-
-            response_text = response_data.get("text", "_Пустой ответ от агента_")
-            chart_data = response_data.get("chart")
-
-            st.markdown(response_text)
-            if chart_data:
-                display_chart(chart_data, debug=debug_mode)
-
-        # сохраняем ответ в историю для последующих перерисовок
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response_text,
-            "chart": chart_data
-        })
+        st.rerun()
