@@ -5,7 +5,7 @@ import pandas as pd
 
 # ================== КОНФИГ ==================
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
-TIMEOUT = (10, 25)  # (connect, read) — чтобы UI не "замирал"
+TIMEOUT = (10, 180)  # (connect, read) — чтобы UI не "замирал"
 
 # ================== СТРАНИЦА ==================
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
