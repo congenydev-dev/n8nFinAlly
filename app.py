@@ -5,7 +5,6 @@ import pandas as pd
 
 # ================== КОНФИГ ==================
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
-TIMEOUT = (10, 180)  # (connect, read) — чтобы UI не "замирал"
 
 # ================== СТРАНИЦА ==================
 st.set_page_config(page_title="Аналитический AI-агент", layout="wide")
@@ -36,11 +35,11 @@ def parse_n8n_response(response_json):
     except Exception as e:
         return {"text": f"Критическая ошибка парсинга: {e}\nСырой ответ: {response_json}", "chart": None}
 
-def ask_agent(prompt: str, session_id: str, url: str, debug: bool) -> dict:
+def ask_agent(prompt: str, session_id: str, url: str, debug: bool, read_timeout: int) -> dict:
     headers = {"x-session-id": session_id}
     payload = {"prompt": prompt, "sessionId": session_id}
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        r = requests.post(url, json=payload, headers=headers, timeout=(10, read_timeout))
         r.raise_for_status()
         raw = r.json()
         if debug:
@@ -63,7 +62,7 @@ def _to_numeric_series(s: pd.Series) -> pd.Series:
     )
 
 def display_chart_streamlit(spec, debug: bool = False):
-    """Только bar_chart и line_chart. Нативные st.bar_chart/st.line_chart."""
+    """Только bar_chart и line_chart — нативные st.bar_chart/st.line_chart."""
     try:
         if not spec:
             return
@@ -114,19 +113,27 @@ with st.sidebar:
     with st.expander("Дополнительные настройки", expanded=False):
         url_input = st.text_input("Webhook URL", value=N8N_URL)
         ss.debug_mode = st.checkbox("Показывать сырой ответ JSON", value=ss.debug_mode)
+        read_timeout = st.slider("Таймаут ответа (сек)", 30, 240, 180, step=10)
+        st.caption(f"Timeout: connect=10s • read={read_timeout}s")
         st.caption("Команды: `/clear` — очистка истории.")
+
+    # мини-диагностика истории
+    st.write("Msgs:", len(ss.messages))
+    try:
+        st.json(ss.messages[-3:])
+    except Exception:
+        pass
+
     st.caption(f"Session: {ss.session_id}")
 
-    if ss.pending:
-        if st.button("⛔ Отменить запрос"):
-            ss.pending = False
-            ss.pending_prompt = ""
-            # Заменим «ожидающий» месседж, если он есть
-            if ss.messages and ss.messages[-1].get("pending"):
-                ss.messages[-1] = {"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None}
-            else:
-                ss.messages.append({"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None})
-            st.rerun()
+    if ss.pending and st.button("⛔ Отменить запрос"):
+        ss.pending = False
+        ss.pending_prompt = ""
+        if ss.messages and ss.messages[-1].get("pending"):
+            ss.messages[-1] = {"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None}
+        else:
+            ss.messages.append({"role": "assistant", "content": "Запрос отменён пользователем.", "chart": None})
+        st.rerun()
 
     if st.button("🧹 Новый чат / очистить всё"):
         ss.session_id = str(uuid.uuid4())
@@ -139,14 +146,14 @@ with st.sidebar:
             pass
         st.rerun()
 
-# ================== LAZY FETCH (без «тени»: только история) ==================
+# ================== LAZY FETCH (без «тени») ==================
 if ss.pending and ss.pending_prompt and not ss.fetch_in_progress:
     ss.fetch_in_progress = True
     try:
-        resp = ask_agent(ss.pending_prompt, ss.session_id, url_input, ss.debug_mode)
+        resp = ask_agent(ss.pending_prompt, ss.session_id, url_input, ss.debug_mode, read_timeout)
         text = resp.get("text", "_Пустой ответ от агента_")
         chart = resp.get("chart")
-        # ВАЖНО: заменяем последнюю «ожидающую» запись, а не добавляем новую
+        # Заменяем pending-плейсхолдер на реальный ответ
         if ss.messages and ss.messages[-1].get("pending"):
             ss.messages[-1] = {"role": "assistant", "content": text, "chart": chart}
         else:
@@ -166,10 +173,7 @@ if ss.pending and ss.pending_prompt and not ss.fetch_in_progress:
 for msg in ss.messages:
     with st.chat_message(msg["role"]):
         if msg.get("pending"):
-            # ОДНО "ожидающее" сообщение — без реального контента (никаких дублей)
-            st.write("… Анализирую данные …")
-            with st.spinner(""):
-                pass
+            st.caption("… Анализирую данные …")  # без spinner, чтобы не было «затемнения»
         else:
             st.markdown(msg["content"])
             if msg.get("chart"):
@@ -184,11 +188,9 @@ if prompt:
         ss.pending_prompt = ""
         st.rerun()
     else:
-        # 1) записываем пользователя
         ss.messages.append({"role": "user", "content": prompt})
-        # 2) добавляем ПЛЕЙСХОЛДЕР ассистента (pending=True)
+        # pending-плейсхолдер — одно «ожидающее» сообщение
         ss.messages.append({"role": "assistant", "content": "", "pending": True})
-        # 3) запускаем фетч
         ss.pending = True
         ss.pending_prompt = prompt
         st.rerun()
