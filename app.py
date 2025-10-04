@@ -19,7 +19,11 @@ if "messages" not in st.session_state:
 def parse_n8n_response(response_json):
     """Ожидаем {'output': {'analytical_report': str, 'chart_data': null|{...}}}"""
     try:
+        # Если пришёл список — берём первый элемент
         data = response_json[0] if isinstance(response_json, list) and response_json else response_json
+        # Если пришло как {"json": {...}} — распакуем
+        if isinstance(data, dict) and isinstance(data.get("json"), dict):
+            data = data["json"]
         out = data.get("output", {}) if isinstance(data, dict) else {}
         text = out.get("analytical_report", "Ошибка: не удалось извлечь текстовый отчёт из ответа.")
         chart = out.get("chart_data", None)
@@ -63,25 +67,47 @@ def show_chart(spec: dict):
         return
 
     df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
-    if x_col not in df.columns or y_col not in df.columns:
+
+    # Оставляем только нужные колонки (защита от лишних ключей)
+    cols = [c for c in [x_col, y_col] if c in df.columns]
+    if set(cols) != {x_col, y_col}:
         st.error("Указанные колонки для графика не найдены в данных.")
         return
+    df = df[cols]
 
+    # Y -> число
     df[y_col] = _to_numeric_series(df[y_col])
     df = df.dropna(subset=[y_col])
     if df.empty:
         st.warning("Данные для графика пустые после очистки.")
         return
 
-    common = dict(x=x_col, y=y_col, use_container_width=True, height=420, sort=False)
     if chart_type == "line_chart":
-        st.line_chart(df[[x_col, y_col]], **common)
+        # Пробуем привести X к числу (например, годы) и отсортировать
+        try:
+            df[x_col] = pd.to_numeric(df[x_col])
+        except Exception:
+            pass
+        df = df.sort_values(by=x_col)
+        # В 1.50.0 use_container_width для line_chart — deprecated → используем width
+        st.line_chart(
+            df,
+            x=x_col,
+            y=y_col,
+            width="stretch",
+            height=420
+        )
     else:
+        # Для bar_chart поддерживаются sort/horizontal/stack/use_container_width
         st.bar_chart(
-            df[[x_col, y_col]],
-            **common,
+            df,
+            x=x_col,
+            y=y_col,
             horizontal=bool(spec.get("horizontal", False)),
-            stack=spec.get("stack", None),
+            sort=spec.get("sort", True),      # True | False | "col" | "-col"
+            stack=spec.get("stack", None),     # True | False | "normalize" | "center" | "layered" | None
+            use_container_width=True,
+            height=420
         )
 
 # ========= РЕНДЕР ИСТОРИИ =========
@@ -108,4 +134,5 @@ if prompt := st.chat_input("Ваш вопрос..."):
         st.markdown(text)
         if chart:
             show_chart(chart)
+
     st.session_state.messages.append({"role": "assistant", "content": text, "chart": chart})
