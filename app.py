@@ -72,11 +72,17 @@ def parse_n8n_response(response_json):
         out = _dig_for_output(response_json)
         if not isinstance(out, dict):
             return {"text": "Не найден ключ 'output' в ответе сервера.", "chart": None}
+
+        # NEW: если прилетело {"output":{"output":{...}}} — разворачиваем до листа
+        while isinstance(out, dict) and "output" in out and isinstance(out["output"], dict):
+            out = out["output"]
+
         text = out.get("analytical_report", "Отчёт отсутствует.")
         chart = out.get("chart_data", None)
         return {"text": text, "chart": chart}
     except Exception as e:
         return {"text": f"Критическая ошибка парсинга: {e}\nСырой ответ: {response_json}", "chart": None}
+
 
 def ask_agent(prompt: str) -> dict:
     headers = {"x-session-id": st.session_state.session_id}
