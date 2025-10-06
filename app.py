@@ -3,16 +3,16 @@ import requests
 import uuid
 import pandas as pd
 import json
-import time  # <-- NEW
+import time
 
 # ========= КОНФИГ =========
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
-TIMEOUT = (10, 240)  # connect=10s, read=240s (4 минуты)
-SESSION_TTL_SEC = 3600  # <-- NEW: TTL 1 час
+TIMEOUT = (10, 240)           # connect=10s, read=240s (4 мин)
+SESSION_TTL_SEC = 3600        # авто-ресет контекста через 1 час неактивности
 
 st.set_page_config(page_title="Analitical Agent", layout="wide")
 
-# ========= СЕССИЯ =========
+# ========= СЕССИЯ/РЕСЕТ =========
 def reset_chat():
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = [{"role": "assistant", "content": "Whom are we firing today?"}]
@@ -26,19 +26,19 @@ if "session_started_at" not in st.session_state:
 if "last_interaction" not in st.session_state:
     st.session_state.last_interaction = time.time()
 
-# ---- АВТО-СБРОС ПО TTL ----
+# авто-ресет по TTL
 now = time.time()
 if now - st.session_state.last_interaction > SESSION_TTL_SEC:
     reset_chat()
     st.toast("Новый диалог: сессия была неактивна > 1 часа.", icon="🧹")
 
-# Кнопка ручного сброса
+# ручной ресет
 st.sidebar.button("🧹 Новый диалог", on_click=reset_chat)
 st.sidebar.caption(f"Сессия: {st.session_state.session_id[:8]}…  • TTL: {SESSION_TTL_SEC//60} мин")
 
 # ========= УТИЛИТЫ =========
 def _dig_for_output(obj):
-    """Рекурсивно находит первый dict с ключом 'output' в любых обёртках/массивах/строках."""
+    """Рекурсивно найти первый dict с ключом 'output' в любых обёртках/массивах/строках."""
     if isinstance(obj, dict):
         if "output" in obj and isinstance(obj["output"], dict):
             return obj["output"]
@@ -67,13 +67,13 @@ def _dig_for_output(obj):
     return None
 
 def parse_n8n_response(response_json):
-    """Ожидаем {'output': {'analytical_report': str, 'chart_data': null|{...}}}"""
+    """Ожидаем {'output': {'analytical_report': str, 'chart_data': null|{...}}}."""
     try:
         out = _dig_for_output(response_json)
         if not isinstance(out, dict):
             return {"text": "Не найден ключ 'output' в ответе сервера.", "chart": None}
 
-        # NEW: если прилетело {"output":{"output":{...}}} — разворачиваем до листа
+        # раскукливание {"output":{"output":{...}}}
         while isinstance(out, dict) and "output" in out and isinstance(out["output"], dict):
             out = out["output"]
 
@@ -82,7 +82,6 @@ def parse_n8n_response(response_json):
         return {"text": text, "chart": chart}
     except Exception as e:
         return {"text": f"Критическая ошибка парсинга: {e}\nСырой ответ: {response_json}", "chart": None}
-
 
 def ask_agent(prompt: str) -> dict:
     headers = {"x-session-id": st.session_state.session_id}
@@ -165,22 +164,21 @@ for msg in st.session_state.messages:
         if msg.get("chart"):
             show_chart(msg["chart"])
 
-# ========= ВВОД ПОЛЬЗОВАТЕЛЯ =========
+# ========= ВВОД ПОЛЬЗОВАТЕЛЯ / ОТВЕТ =========
 if prompt := st.chat_input("Ваш вопрос..."):
-    st.session_state.last_interaction = time.time()  # <-- обновляем TTL при вводе
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.last_interaction = time.time()
+
+    # 1) Сразу показываем сообщение пользователя и кладём в историю
     with st.chat_message("user"):
         st.markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
 
+    # 2) Получаем ответ от агента (без доп.рендеров ассистента в этот прогон)
     resp = ask_agent(prompt)
     text = resp.get("text", "_Пустой ответ от агента_")
     chart = resp.get("chart")
 
-    with st.chat_message("assistant"):
-        st.markdown(text)
-        if chart:
-            show_chart(chart)
-        else:
-            st.info("График не отрисован: агент не вернул chart_data для этого ответа.")
-
+    # 3) Кладём ассистента в историю и запускаем rerun,
+    # чтобы сообщение нарисовалось РОВНО один раз из верхнего цикла.
     st.session_state.messages.append({"role": "assistant", "content": text, "chart": chart})
+    st.rerun()
