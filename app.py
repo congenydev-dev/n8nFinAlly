@@ -2,19 +2,39 @@ import streamlit as st
 import requests
 import uuid
 import pandas as pd
-import json  # <-- добавили
+import json
+import time  # <-- NEW
 
 # ========= КОНФИГ =========
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
 TIMEOUT = (10, 240)  # connect=10s, read=240s (4 минуты)
+SESSION_TTL_SEC = 3600  # <-- NEW: TTL 1 час
 
 st.set_page_config(page_title="Analitical Agent", layout="wide")
 
 # ========= СЕССИЯ =========
-if "session_id" not in st.session_state:
+def reset_chat():
     st.session_state.session_id = str(uuid.uuid4())
-if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Whom are we firing today?"}]
+    st.session_state.session_started_at = time.time()
+    st.session_state.last_interaction = time.time()
+
+if "session_id" not in st.session_state:
+    reset_chat()
+if "session_started_at" not in st.session_state:
+    st.session_state.session_started_at = time.time()
+if "last_interaction" not in st.session_state:
+    st.session_state.last_interaction = time.time()
+
+# ---- АВТО-СБРОС ПО TTL ----
+now = time.time()
+if now - st.session_state.last_interaction > SESSION_TTL_SEC:
+    reset_chat()
+    st.toast("Новый диалог: сессия была неактивна > 1 часа.", icon="🧹")
+
+# Кнопка ручного сброса
+st.sidebar.button("🧹 Новый диалог", on_click=reset_chat)
+st.sidebar.caption(f"Сессия: {st.session_state.session_id[:8]}…  • TTL: {SESSION_TTL_SEC//60} мин")
 
 # ========= УТИЛИТЫ =========
 def _dig_for_output(obj):
@@ -22,13 +42,11 @@ def _dig_for_output(obj):
     if isinstance(obj, dict):
         if "output" in obj and isinstance(obj["output"], dict):
             return obj["output"]
-        # популярные обёртки n8n
-        for k in ("json", "data", "body", "result"):
+        for k in ("json", "data", "body", "result", "response"):
             if k in obj:
                 got = _dig_for_output(obj[k])
                 if got is not None:
                     return got
-        # пройтись по всем значениям (на всякий)
         for v in obj.values():
             got = _dig_for_output(v)
             if got is not None:
@@ -39,7 +57,6 @@ def _dig_for_output(obj):
             if got is not None:
                 return got
     elif isinstance(obj, str):
-        # иногда прилетает JSON-строка (в т.ч. в ```json ... ```)
         s = obj.strip()
         if s.startswith("```"):
             s = s.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
@@ -84,7 +101,6 @@ def _to_numeric_series(s: pd.Series) -> pd.Series:
     )
 
 def _norm_key(s: str) -> str:
-    # унифицируем ключи: убираем NBSP, лишние пробелы, lower
     return str(s).replace("\u00A0", " ").strip().lower()
 
 def show_chart(spec: dict):
@@ -101,8 +117,6 @@ def show_chart(spec: dict):
         return
 
     df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
-
-    # сопоставляем реальные колонки по нормализованным именам (на случай NBSP/регистра)
     cmap = {_norm_key(c): c for c in df.columns}
     x_col = cmap.get(_norm_key(x_key))
     y_col = cmap.get(_norm_key(y_key))
@@ -112,15 +126,12 @@ def show_chart(spec: dict):
         return
 
     df = df[[x_col, y_col]].rename(columns={x_col: x_key, y_col: y_key})
-
-    # привести Y к числу
     df[y_key] = _to_numeric_series(df[y_key])
     df = df.dropna(subset=[y_key])
     if df.empty:
         st.info("График не построен: после очистки чисел данные пустые.")
         return
 
-    # опциональная сортировка по Y, если когда-нибудь пришлёшь флаг
     sort_by_y = spec.get("sort_by_y")  # "asc" | "desc" | None
     if sort_by_y == "asc":
         df = df.sort_values(y_key, ascending=True)
@@ -135,8 +146,8 @@ def show_chart(spec: dict):
             x=x_key,
             y=y_key,
             horizontal=bool(spec.get("horizontal", False)),
-            sort=spec.get("sort", True),          # True | False | "col" | "-col"
-            stack=spec.get("stack", None),         # True | False | "normalize" | "center" | "layered" | None
+            sort=spec.get("sort", True),
+            stack=spec.get("stack", None),
             use_container_width=True,
             height=420,
         )
@@ -150,17 +161,15 @@ for msg in st.session_state.messages:
 
 # ========= ВВОД ПОЛЬЗОВАТЕЛЯ =========
 if prompt := st.chat_input("Ваш вопрос..."):
-    # 1) Пишем пользователя в историю и рисуем его сообщение
+    st.session_state.last_interaction = time.time()  # <-- обновляем TTL при вводе
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 2) Синхронно спрашиваем n8n (до 4 минут, без спиннеров)
     resp = ask_agent(prompt)
     text = resp.get("text", "_Пустой ответ от агента_")
     chart = resp.get("chart")
 
-    # 3) Рисуем ответ и добавляем его в историю
     with st.chat_message("assistant"):
         st.markdown(text)
         if chart:
