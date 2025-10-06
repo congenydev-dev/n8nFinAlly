@@ -1,9 +1,10 @@
-import streamlit as st
-import requests
-import uuid
-import pandas as pd
+import re
 import json
 import time
+import uuid
+import requests
+import pandas as pd
+import streamlit as st
 
 # ========= КОНФИГ =========
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
@@ -36,44 +37,74 @@ if now - st.session_state.last_interaction > SESSION_TTL_SEC:
 st.sidebar.button("🧹 Новый диалог", on_click=reset_chat)
 st.sidebar.caption(f"Сессия: {st.session_state.session_id[:8]}…  • TTL: {SESSION_TTL_SEC//60} мин")
 
-# ========= УТИЛИТЫ =========
+# ========= ПАРСЕР ОТВЕТА =========
+def _try_parse_json_string(s: str):
+    """Снять ```json ... ``` и распарсить. Возвращает dict/list или None."""
+    if not isinstance(s, str):
+        return None
+    txt = s.strip()
+    if txt.startswith("```"):
+        txt = re.sub(r"^```(?:json|JSON)?\s*", "", txt)
+        txt = re.sub(r"\s*```$", "", txt)
+    # если есть лишний префикс — вытащим первую {...}
+    if not txt.lstrip().startswith("{"):
+        m = re.search(r"\{[\s\S]*\}\s*$", txt)
+        if m:
+            txt = m.group(0)
+    try:
+        return json.loads(txt)
+    except Exception:
+        return None
+
 def _dig_for_output(obj):
-    """Рекурсивно найти первый dict с ключом 'output' в любых обёртках/массивах/строках."""
+    """Рекурсивно находит первый dict с ключом 'output' (учитывает строки с JSON, массивы и обёртки)."""
+    # строка -> пробуем распарсить как JSON
+    if isinstance(obj, str):
+        parsed = _try_parse_json_string(obj)
+        return _dig_for_output(parsed) if parsed is not None else None
+
+    # словарь
     if isinstance(obj, dict):
+        # 'output' как строка с JSON
+        if "output" in obj and isinstance(obj["output"], str):
+            parsed = _try_parse_json_string(obj["output"])
+            if parsed is not None:
+                return _dig_for_output(parsed)
+
+        # 'output' как dict
         if "output" in obj and isinstance(obj["output"], dict):
             return obj["output"]
+
+        # популярные ключи-обёртки
         for k in ("json", "data", "body", "result", "response"):
             if k in obj:
                 got = _dig_for_output(obj[k])
                 if got is not None:
                     return got
+
+        # перебор остальных значений
         for v in obj.values():
             got = _dig_for_output(v)
             if got is not None:
                 return got
-    elif isinstance(obj, list):
+        return None
+
+    # массив
+    if isinstance(obj, list):
         for el in obj:
             got = _dig_for_output(el)
             if got is not None:
                 return got
-    elif isinstance(obj, str):
-        s = obj.strip()
-        if s.startswith("```"):
-            s = s.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
-        try:
-            return _dig_for_output(json.loads(s))
-        except Exception:
-            pass
     return None
 
 def parse_n8n_response(response_json):
-    """Ожидаем {'output': {'analytical_report': str, 'chart_data': null|{...}}}."""
+    """Ждём {'output': {'analytical_report': str, 'chart_data': null|{...}}} — с любыми обёртками/кодфенсами."""
     try:
         out = _dig_for_output(response_json)
         if not isinstance(out, dict):
-            return {"text": "Не найден ключ 'output' в ответе сервера.", "chart": None}
+            return {"text": "Не найден корректный 'output' в ответе сервера.", "chart": None}
 
-        # раскукливание {"output":{"output":{...}}}
+        # разворачиваем лишние nesting-и: {"output":{"output":{...}}}
         while isinstance(out, dict) and "output" in out and isinstance(out["output"], dict):
             out = out["output"]
 
@@ -83,6 +114,7 @@ def parse_n8n_response(response_json):
     except Exception as e:
         return {"text": f"Критическая ошибка парсинга: {e}\nСырой ответ: {response_json}", "chart": None}
 
+# ========= СЕТЕВОЙ ВЫЗОВ =========
 def ask_agent(prompt: str) -> dict:
     headers = {"x-session-id": st.session_state.session_id}
     payload = {"prompt": prompt, "sessionId": st.session_state.session_id}
@@ -95,6 +127,7 @@ def ask_agent(prompt: str) -> dict:
     except Exception as e:
         return {"text": f"Неожиданная ошибка: {e}", "chart": None}
 
+# ========= УТИЛИТЫ ДЛЯ ГРАФИКОВ =========
 def _to_numeric_series(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
@@ -144,7 +177,8 @@ def show_chart(spec: dict):
         df = df.sort_values(y_key, ascending=False)
 
     if ctype == "line_chart":
-        st.line_chart(df, x=x_key, y=y_key, width="stretch", height="content")
+        # без width="stretch"/height="content" — это иногда ломает
+        st.line_chart(df, x=x_key, y=y_key, use_container_width=True)
     else:
         st.bar_chart(
             df,
@@ -154,7 +188,6 @@ def show_chart(spec: dict):
             sort=spec.get("sort", True),
             stack=spec.get("stack", None),
             use_container_width=True,
-            height=420,
         )
 
 # ========= РЕНДЕР ИСТОРИИ =========
@@ -168,17 +201,16 @@ for msg in st.session_state.messages:
 if prompt := st.chat_input("Ваш вопрос..."):
     st.session_state.last_interaction = time.time()
 
-    # 1) Сразу показываем сообщение пользователя и кладём в историю
+    # 1) показать сообщение пользователя и записать в историю
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 2) Получаем ответ от агента (без доп.рендеров ассистента в этот прогон)
+    # 2) запрос к n8n
     resp = ask_agent(prompt)
     text = resp.get("text", "_Пустой ответ от агента_")
     chart = resp.get("chart")
 
-    # 3) Кладём ассистента в историю и запускаем rerun,
-    # чтобы сообщение нарисовалось РОВНО один раз из верхнего цикла.
+    # 3) добавить ответ ассистента в историю и пере-рендерить РОВНО один раз
     st.session_state.messages.append({"role": "assistant", "content": text, "chart": chart})
     st.rerun()
