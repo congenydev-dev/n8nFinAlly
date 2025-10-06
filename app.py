@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import uuid
 import pandas as pd
+import json  # <-- добавили
 
 # ========= КОНФИГ =========
 N8N_URL = "https://finally.app.n8n.cloud/webhook/bf4dd093-bb02-472c-9454-7ab9af97bd1d"
@@ -16,16 +17,45 @@ if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Whom are we firing today?"}]
 
 # ========= УТИЛИТЫ =========
+def _dig_for_output(obj):
+    """Рекурсивно находит первый dict с ключом 'output' в любых обёртках/массивах/строках."""
+    if isinstance(obj, dict):
+        if "output" in obj and isinstance(obj["output"], dict):
+            return obj["output"]
+        # популярные обёртки n8n
+        for k in ("json", "data", "body", "result"):
+            if k in obj:
+                got = _dig_for_output(obj[k])
+                if got is not None:
+                    return got
+        # пройтись по всем значениям (на всякий)
+        for v in obj.values():
+            got = _dig_for_output(v)
+            if got is not None:
+                return got
+    elif isinstance(obj, list):
+        for el in obj:
+            got = _dig_for_output(el)
+            if got is not None:
+                return got
+    elif isinstance(obj, str):
+        # иногда прилетает JSON-строка (в т.ч. в ```json ... ```)
+        s = obj.strip()
+        if s.startswith("```"):
+            s = s.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
+        try:
+            return _dig_for_output(json.loads(s))
+        except Exception:
+            pass
+    return None
+
 def parse_n8n_response(response_json):
     """Ожидаем {'output': {'analytical_report': str, 'chart_data': null|{...}}}"""
     try:
-        # Если пришёл список — берём первый элемент
-        data = response_json[0] if isinstance(response_json, list) and response_json else response_json
-        # Если пришло как {"json": {...}} — распакуем
-        if isinstance(data, dict) and isinstance(data.get("json"), dict):
-            data = data["json"]
-        out = data.get("output", {}) if isinstance(data, dict) else {}
-        text = out.get("analytical_report", "Ошибка: не удалось извлечь текстовый отчёт из ответа.")
+        out = _dig_for_output(response_json)
+        if not isinstance(out, dict):
+            return {"text": "Не найден ключ 'output' в ответе сервера.", "chart": None}
+        text = out.get("analytical_report", "Отчёт отсутствует.")
         chart = out.get("chart_data", None)
         return {"text": text, "chart": chart}
     except Exception as e:
@@ -53,61 +83,62 @@ def _to_numeric_series(s: pd.Series) -> pd.Series:
          .pipe(pd.to_numeric, errors="coerce")
     )
 
+def _norm_key(s: str) -> str:
+    # унифицируем ключи: убираем NBSP, лишние пробелы, lower
+    return str(s).replace("\u00A0", " ").strip().lower()
+
 def show_chart(spec: dict):
-    """Только bar_chart и line_chart (нативный Streamlit)."""
+    """Рендер bar/line на основе chart_data (нативные Streamlit-чарты)."""
     if not spec:
         return
     data = spec.get("data")
-    x_col = spec.get("x_column")
-    y_col = spec.get("y_column")
-    chart_type = (spec.get("type") or "bar_chart").lower()
+    x_key = spec.get("x_column")
+    y_key = spec.get("y_column")
+    ctype = (spec.get("type") or "bar_chart").lower()
 
-    if not (data and x_col and y_col):
+    if not (data and x_key and y_key):
         st.error("chart_data неполный (нужны data/x_column/y_column).")
         return
 
     df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
 
-    # Оставляем только нужные колонки (защита от лишних ключей)
-    cols = [c for c in [x_col, y_col] if c in df.columns]
-    if set(cols) != {x_col, y_col}:
-        st.error("Указанные колонки для графика не найдены в данных.")
+    # сопоставляем реальные колонки по нормализованным именам (на случай NBSP/регистра)
+    cmap = {_norm_key(c): c for c in df.columns}
+    x_col = cmap.get(_norm_key(x_key))
+    y_col = cmap.get(_norm_key(y_key))
+    if not x_col or not y_col:
+        st.error(f"Колонки не найдены. Ожидались '{x_key}' и '{y_key}'.")
+        st.write("columns:", list(df.columns))
         return
-    df = df[cols]
 
-    # Y -> число
-    df[y_col] = _to_numeric_series(df[y_col])
-    df = df.dropna(subset=[y_col])
+    df = df[[x_col, y_col]].rename(columns={x_col: x_key, y_col: y_key})
+
+    # привести Y к числу
+    df[y_key] = _to_numeric_series(df[y_key])
+    df = df.dropna(subset=[y_key])
     if df.empty:
-        st.warning("Данные для графика пустые после очистки.")
+        st.info("График не построен: после очистки чисел данные пустые.")
         return
 
-    if chart_type == "line_chart":
-        # Пробуем привести X к числу (например, годы) и отсортировать
-        try:
-            df[x_col] = pd.to_numeric(df[x_col])
-        except Exception:
-            pass
-        df = df.sort_values(by=x_col)
-        # В 1.50.0 use_container_width для line_chart — deprecated → используем width
-        st.line_chart(
-            df,
-            x=x_col,
-            y=y_col,
-            width="stretch",
-            height=420
-        )
+    # опциональная сортировка по Y, если когда-нибудь пришлёшь флаг
+    sort_by_y = spec.get("sort_by_y")  # "asc" | "desc" | None
+    if sort_by_y == "asc":
+        df = df.sort_values(y_key, ascending=True)
+    elif sort_by_y == "desc":
+        df = df.sort_values(y_key, ascending=False)
+
+    if ctype == "line_chart":
+        st.line_chart(df, x=x_key, y=y_key, width="stretch", height="content")
     else:
-        # Для bar_chart поддерживаются sort/horizontal/stack/use_container_width
         st.bar_chart(
             df,
-            x=x_col,
-            y=y_col,
+            x=x_key,
+            y=y_key,
             horizontal=bool(spec.get("horizontal", False)),
-            sort=spec.get("sort", True),      # True | False | "col" | "-col"
-            stack=spec.get("stack", None),     # True | False | "normalize" | "center" | "layered" | None
+            sort=spec.get("sort", True),          # True | False | "col" | "-col"
+            stack=spec.get("stack", None),         # True | False | "normalize" | "center" | "layered" | None
             use_container_width=True,
-            height=420
+            height=420,
         )
 
 # ========= РЕНДЕР ИСТОРИИ =========
@@ -134,5 +165,7 @@ if prompt := st.chat_input("Ваш вопрос..."):
         st.markdown(text)
         if chart:
             show_chart(chart)
+        else:
+            st.info("График не отрисован: агент не вернул chart_data для этого ответа.")
 
     st.session_state.messages.append({"role": "assistant", "content": text, "chart": chart})
