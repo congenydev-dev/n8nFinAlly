@@ -58,38 +58,31 @@ def _try_parse_json_string(s: str):
 
 def _dig_for_output(obj):
     """Рекурсивно находит первый dict с ключом 'output' (учитывает строки с JSON, массивы и обёртки)."""
-    # строка -> пробуем распарсить как JSON
     if isinstance(obj, str):
         parsed = _try_parse_json_string(obj)
         return _dig_for_output(parsed) if parsed is not None else None
 
-    # словарь
     if isinstance(obj, dict):
-        # 'output' как строка с JSON
         if "output" in obj and isinstance(obj["output"], str):
             parsed = _try_parse_json_string(obj["output"])
             if parsed is not None:
                 return _dig_for_output(parsed)
 
-        # 'output' как dict
         if "output" in obj and isinstance(obj["output"], dict):
             return obj["output"]
 
-        # популярные ключи-обёртки
         for k in ("json", "data", "body", "result", "response"):
             if k in obj:
                 got = _dig_for_output(obj[k])
                 if got is not None:
                     return got
 
-        # перебор остальных значений
         for v in obj.values():
             got = _dig_for_output(v)
             if got is not None:
                 return got
         return None
 
-    # массив
     if isinstance(obj, list):
         for el in obj:
             got = _dig_for_output(el)
@@ -142,53 +135,72 @@ def _norm_key(s: str) -> str:
     return str(s).replace("\u00A0", " ").strip().lower()
 
 def show_chart(spec: dict):
-    """Рендер bar/line на основе chart_data (нативные Streamlit-чарты)."""
     if not spec:
         return
     data = spec.get("data")
     x_key = spec.get("x_column")
-    y_key = spec.get("y_column")
+    y_key = spec.get("y_column")            # одиночная серия
+    y_keys = spec.get("y_columns")          # мульти-серия wide
+    color_col = spec.get("color_column")    # мульти-серия long
     ctype = (spec.get("type") or "bar_chart").lower()
+    width = spec.get("width", "stretch")
+    height = spec.get("height", "content")
 
-    if not (data and x_key and y_key):
-        st.error("chart_data неполный (нужны data/x_column/y_column).")
+    if not (data and x_key and (y_key or y_keys)):
+        st.error("chart_data неполный: нужны data, x_column и y_column|y_columns.")
         return
 
+    # df
     df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
-    cmap = {_norm_key(c): c for c in df.columns}
-    x_col = cmap.get(_norm_key(x_key))
-    y_col = cmap.get(_norm_key(y_key))
-    if not x_col or not y_col:
-        st.error(f"Колонки не найдены. Ожидались '{x_key}' и '{y_key}'.")
-        st.write("columns:", list(df.columns))
-        return
 
-    df = df[[x_col, y_col]].rename(columns={x_col: x_key, y_col: y_key})
-    df[y_key] = _to_numeric_series(df[y_key])
-    df = df.dropna(subset=[y_key])
-    if df.empty:
-        st.info("График не построен: после очистки чисел данные пустые.")
-        return
+    # нормализация чисел
+    def _clean_num(s: pd.Series) -> pd.Series:
+        return (s.astype(str)
+                 .str.replace("\u00A0","",regex=False)
+                 .str.replace("%","",regex=False)
+                 .str.replace(" ","",regex=False)
+                 .str.replace(",",".",regex=False)
+                 .pipe(pd.to_numeric, errors="coerce"))
 
-    sort_by_y = spec.get("sort_by_y")  # "asc" | "desc" | None
-    if sort_by_y == "asc":
-        df = df.sort_values(y_key, ascending=True)
-    elif sort_by_y == "desc":
-        df = df.sort_values(y_key, ascending=False)
+    # сортируем по X
+    if x_key in df.columns:
+        df = df.sort_values(x_key)
 
     if ctype == "line_chart":
-        # без width="stretch"/height="content" — это иногда ломает
-        st.line_chart(df, x=x_key, y=y_key, use_container_width=True)
+        if y_keys:  # wide-format multi-series
+            # только реально существующие и численные колонки
+            cols = [y for y in y_keys if y in df.columns]
+            if not cols:
+                st.error("Нет ни одной из указанных y_columns в данных.")
+                return
+            for y in cols:
+                df[y] = _clean_num(df[y])
+            plot_df = df[[x_key] + cols].dropna(how="all", subset=cols)
+            if plot_df.empty:
+                st.info("График не построен: все значения метрик пусты после очистки.")
+                return
+            st.line_chart(plot_df, x=x_key, y=cols, width=width, height=height)
+        else:
+            # single-series (and possibly long-format if color_col is present)
+            if color_col and color_col in df.columns:
+                # long format: нужно развернуть в wide, чтобы отдать несколько линий
+                # pivot: index=x, columns=color, values=y
+                df[y_key] = _clean_num(df[y_key])  # так?
+                pivot = df.pivot(index=x_key, columns=color_col, values=y_key).reset_index()
+                # Streamlit line_chart поддерживает список y
+                y_cols = [c for c in pivot.columns if c != x_key]
+                st.line_chart(pivot, x=x_key, y=y_cols, width=width, height=height)
+            else:
+                # single line
+                df[y_key] = _clean_num(df[y_key])
+                plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
+                if plot_df.empty:
+                    st.info("График не построен: значения метрики пусты после очистки.")
+                    return
+                st.line_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
     else:
-        st.bar_chart(
-            df,
-            x=x_key,
-            y=y_key,
-            horizontal=bool(spec.get("horizontal", False)),
-            sort=spec.get("sort", True),
-            stack=spec.get("stack", None),
-            use_container_width=True,
-        )
+        # бар-чарт без deprecated use_container_width
+        st.bar_chart(df, x=x_key, y=y_key or y_keys, width=width, height=height)
 
 # ========= РЕНДЕР ИСТОРИИ =========
 for msg in st.session_state.messages:
