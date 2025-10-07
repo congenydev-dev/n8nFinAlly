@@ -31,7 +31,7 @@ if "last_interaction" not in st.session_state:
 now = time.time()
 if now - st.session_state.last_interaction > SESSION_TTL_SEC:
     reset_chat()
-    st.toast("New dialog: session was inactive > 1 hour"", icon="")
+    st.toast("New dialog: session was inactive > 1 hour"", icon="🧹")
 
 # ручной ресет
 st.sidebar.button(" New Chat", on_click=reset_chat)
