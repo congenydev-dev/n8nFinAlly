@@ -31,10 +31,10 @@ if "last_interaction" not in st.session_state:
 now = time.time()
 if now - st.session_state.last_interaction > SESSION_TTL_SEC:
     reset_chat()
-    st.toast("Новый диалог: сессия была неактивна > 1 часа.", icon="🧹")
+    st.toast("New dialog: session was inactive > 1 hour"", icon="🧹")
 
 # ручной ресет
-st.sidebar.button("🧹 Новый диалог", on_click=reset_chat)
+st.sidebar.button("🧹 New Chat", on_click=reset_chat)
 st.sidebar.caption(f"Сессия: {st.session_state.session_id[:8]}…  • TTL: {SESSION_TTL_SEC//60} мин")
 
 # ========= ПАРСЕР ОТВЕТА =========
@@ -210,7 +210,7 @@ for msg in st.session_state.messages:
             show_chart(msg["chart"])
 
 # ========= ВВОД ПОЛЬЗОВАТЕЛЯ / ОТВЕТ =========
-if prompt := st.chat_input("Ваш вопрос..."):
+if prompt := st.chat_input("Go slow—I’m cloud-based. Rust requires metal."):
     st.session_state.last_interaction = time.time()
 
     # 1) показать сообщение пользователя и записать в историю
