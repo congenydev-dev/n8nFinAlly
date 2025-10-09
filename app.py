@@ -218,7 +218,14 @@ def show_chart(spec: dict):
                 return df.sort_values(x_key)
         return df
 
-    df = _maybe_sort(df)
+        df = _maybe_sort(df)
+
+    # Зафиксировать порядок категорий по оси X ровно как в df сейчас
+    if x_key in df.columns:
+        order = df[x_key].tolist()
+        df[x_key] = pd.Categorical(df[x_key], categories=order, ordered=True)
+
+    
 
     # --- построение ---
     if ctype == "line_chart":
