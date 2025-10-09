@@ -33,7 +33,6 @@ if now - st.session_state.last_interaction > SESSION_TTL_SEC:
     reset_chat()
     st.toast("New dialog: session was inactive > 1 hour.")
 
-
 # ручной ресет
 st.sidebar.button(" New Chat", on_click=reset_chat)
 st.sidebar.caption(f"Сессия: {st.session_state.session_id[:8]}…  • TTL: {SESSION_TTL_SEC//60} мин")
@@ -135,73 +134,172 @@ def _to_numeric_series(s: pd.Series) -> pd.Series:
 def _norm_key(s: str) -> str:
     return str(s).replace("\u00A0", " ").strip().lower()
 
+# ========= РЕНДЕР ГРАФИКОВ =========
 def show_chart(spec: dict):
     if not spec:
         return
-    data = spec.get("data")
-    x_key = spec.get("x_column")
-    y_key = spec.get("y_column")            # одиночная серия
-    y_keys = spec.get("y_columns")          # мульти-серия wide
-    color_col = spec.get("color_column")    # мульти-серия long
-    ctype = (spec.get("type") or "bar_chart").lower()
-    width = spec.get("width", "stretch")
-    height = spec.get("height", "content")
 
-    if not (data and x_key and (y_key or y_keys)):
-        st.error("chart_data неполный: нужны data, x_column и y_column|y_columns.")
+    # --- извлечение параметров ---
+    data      = spec.get("data")
+    x_key     = spec.get("x_column")
+    y_key     = spec.get("y_column")           # одиночная серия
+    y_keys    = spec.get("y_columns")          # мульти-серия (wide)
+    color_col = spec.get("color_column")       # длинная форма (long → wide)
+    ctype     = (spec.get("type") or "bar_chart").lower()
+    sort_flag = (spec.get("sort") or None)     # "y_asc" | "y_desc" | None
+
+    # width/height: Streamlit ждёт int|None
+    def _as_size(v):
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        try:
+            return int(str(v).strip())
+        except Exception:
+            return None
+
+    width  = _as_size(spec.get("width"))
+    height = _as_size(spec.get("height"))
+    use_container_width = spec.get("use_container_width", True) if width is None else False
+
+    if not (data and x_key and (y_key or y_keys or (y_key and color_col))):
+        st.error("chart_data неполный: нужны data, x_column и (y_column | y_columns | y_column+color_column).")
         return
 
-    # df
+    # --- dataframe ---
     df = pd.DataFrame([data]) if isinstance(data, dict) else pd.DataFrame(data)
 
-    # нормализация чисел
+    # --- очистка чисел ---
     def _clean_num(s: pd.Series) -> pd.Series:
-        return (s.astype(str)
-                 .str.replace("\u00A0","",regex=False)
-                 .str.replace("%","",regex=False)
-                 .str.replace(" ","",regex=False)
-                 .str.replace(",",".",regex=False)
-                 .pipe(pd.to_numeric, errors="coerce"))
+        return (
+            s.astype(str)
+             .str.replace("\u00A0","",regex=False)  # NBSP
+             .str.replace("%","",regex=False)
+             .str.replace(" ","",regex=False)
+             .str.replace(",",".",regex=False)
+             .pipe(pd.to_numeric, errors="coerce")
+        )
 
-    # сортируем по X
-    if x_key in df.columns:
-        df = df.sort_values(x_key)
+    # --- сортировка (НЕ сортируем по X по умолчанию) ---
+    def _maybe_sort(df: pd.DataFrame) -> pd.DataFrame:
+        # удаляем дубли (особенно пары x,y)
+        if y_key and y_key in df.columns:
+            df = df.drop_duplicates(subset=[x_key, y_key], keep="first")
+        else:
+            df = df.drop_duplicates()
 
+        if sort_flag in ("y_asc", "y_desc"):
+            asc = (sort_flag == "y_asc")
+            # single y
+            if y_key and y_key in df.columns:
+                tmp = df.copy()
+                tmp[y_key] = _clean_num(tmp[y_key])
+                return tmp.sort_values(y_key, ascending=asc)
+            # wide y_columns
+            if y_keys:
+                cols = [c for c in y_keys if c in df.columns]
+                if cols:
+                    tmp = df.copy()
+                    for c in cols:
+                        tmp[c] = _clean_num(tmp[c])
+                    tmp["_sum_y"] = tmp[cols].sum(axis=1, skipna=True)
+                    tmp = tmp.sort_values("_sum_y", ascending=asc).drop(columns="_sum_y")
+                    return tmp
+            # long (y + color)
+            if color_col and y_key and y_key in df.columns:
+                tmp = df.copy()
+                tmp[y_key] = _clean_num(tmp[y_key])
+                agg = (tmp.groupby(x_key, as_index=False)[y_key]
+                           .sum()
+                           .sort_values(y_key, ascending=asc))
+                order = agg[x_key].tolist()
+                df[x_key] = pd.Categorical(df[x_key], categories=order, ordered=True)
+                return df.sort_values(x_key)
+        return df
+
+    df = _maybe_sort(df)
+
+    # --- построение ---
     if ctype == "line_chart":
-        if y_keys:  # wide-format multi-series
-            # только реально существующие и численные колонки
+        if y_keys:  # wide multi-series
             cols = [y for y in y_keys if y in df.columns]
             if not cols:
-                st.error("Нет ни одной из указанных y_columns в данных.")
+                st.error("Нет ни одной из указанных y_columns в data.")
                 return
             for y in cols:
                 df[y] = _clean_num(df[y])
             plot_df = df[[x_key] + cols].dropna(how="all", subset=cols)
             if plot_df.empty:
-                st.info("График не построен: все значения метрик пусты после очистки.")
+                st.info("Все значения метрик пусты после очистки.")
                 return
-            st.line_chart(plot_df, x=x_key, y=cols, width=width, height=height)
+            st.line_chart(
+                plot_df, x=x_key, y=cols,
+                width=width, height=height, use_container_width=use_container_width
+            )
+
+        elif color_col and color_col in df.columns and y_key in df.columns:
+            df[y_key] = _clean_num(df[y_key])
+            pivot = df.pivot(index=x_key, columns=color_col, values=y_key).reset_index()
+            y_cols = [c for c in pivot.columns if c != x_key]
+            st.line_chart(
+                pivot, x=x_key, y=y_cols,
+                width=width, height=height, use_container_width=use_container_width
+            )
+
         else:
-            # single-series (and possibly long-format if color_col is present)
-            if color_col and color_col in df.columns:
-                # long format: нужно развернуть в wide, чтобы отдать несколько линий
-                # pivot: index=x, columns=color, values=y
-                df[y_key] = _clean_num(df[y_key])  # так?
-                pivot = df.pivot(index=x_key, columns=color_col, values=y_key).reset_index()
-                # Streamlit line_chart поддерживает список y
-                y_cols = [c for c in pivot.columns if c != x_key]
-                st.line_chart(pivot, x=x_key, y=y_cols, width=width, height=height)
-            else:
-                # single line
-                df[y_key] = _clean_num(df[y_key])
-                plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
-                if plot_df.empty:
-                    st.info("График не построен: значения метрики пусты после очистки.")
-                    return
-                st.line_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
-    else:
-        # бар-чарт без deprecated use_container_width
-        st.bar_chart(df, x=x_key, y=y_key or y_keys, width=width, height=height)
+            if y_key not in df.columns:
+                st.error("y_column не найден в data.")
+                return
+            df[y_key] = _clean_num(df[y_key])
+            plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
+            if plot_df.empty:
+                st.info("Значения метрики пустые после очистки.")
+                return
+            st.line_chart(
+                plot_df, x=x_key, y=y_key,
+                width=width, height=height, use_container_width=use_container_width
+            )
+
+    else:  # BAR
+        if y_keys:  # wide multi-series
+            cols = [y for y in y_keys if y in df.columns]
+            if not cols:
+                st.error("Нет ни одной из указанных y_columns в data.")
+                return
+            for y in cols:
+                df[y] = _clean_num(df[y])
+            plot_df = df[[x_key] + cols].dropna(how="all", subset=cols)
+            if plot_df.empty:
+                st.info("Все значения метрик пусты после очистки.")
+                return
+            st.bar_chart(
+                plot_df, x=x_key, y=cols,
+                width=width, height=height, use_container_width=use_container_width
+            )
+
+        elif color_col and color_col in df.columns and y_key in df.columns:
+            df[y_key] = _clean_num(df[y_key])
+            pivot = df.pivot(index=x_key, columns=color_col, values=y_key).reset_index()
+            y_cols = [c for c in pivot.columns if c != x_key]
+            st.bar_chart(
+                pivot, x=x_key, y=y_cols,
+                width=width, height=height, use_container_width=use_container_width
+            )
+
+        else:
+            if y_key not in df.columns:
+                st.error("y_column не найден в data.")
+                return
+            df[y_key] = _clean_num(df[y_key])
+            plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
+            if plot_df.empty:
+                st.info("Значения метрики пустые после очистки.")
+                return
+            st.bar_chart(
+                plot_df, x=x_key, y=y_key,
+                width=width, height=height, use_container_width=use_container_width
+            )
 
 # ========= РЕНДЕР ИСТОРИИ =========
 for msg in st.session_state.messages:
