@@ -182,50 +182,62 @@ def show_chart(spec: dict):
         )
 
     # --- сортировка (НЕ сортируем по X по умолчанию) ---
-    def _maybe_sort(df: pd.DataFrame) -> pd.DataFrame:
-        # удаляем дубли (особенно пары x,y)
-        if y_key and y_key in df.columns:
-            df = df.drop_duplicates(subset=[x_key, y_key], keep="first")
+    def _maybe_sort(df_in: pd.DataFrame) -> pd.DataFrame:
+        df_local = df_in.copy()
+        # удаляем дубли пар (x,y), иначе pivot/категории дублируются
+        if y_key and y_key in df_local.columns:
+            df_local = df_local.drop_duplicates(subset=[x_key, y_key], keep="first")
         else:
-            df = df.drop_duplicates()
+            df_local = df_local.drop_duplicates()
 
         if sort_flag in ("y_asc", "y_desc"):
             asc = (sort_flag == "y_asc")
             # single y
-            if y_key and y_key in df.columns:
-                tmp = df.copy()
+            if y_key and y_key in df_local.columns:
+                tmp = df_local.copy()
                 tmp[y_key] = _clean_num(tmp[y_key])
                 return tmp.sort_values(y_key, ascending=asc)
             # wide y_columns
             if y_keys:
-                cols = [c for c in y_keys if c in df.columns]
+                cols = [c for c in y_keys if c in df_local.columns]
                 if cols:
-                    tmp = df.copy()
+                    tmp = df_local.copy()
                     for c in cols:
                         tmp[c] = _clean_num(tmp[c])
                     tmp["_sum_y"] = tmp[cols].sum(axis=1, skipna=True)
                     tmp = tmp.sort_values("_sum_y", ascending=asc).drop(columns="_sum_y")
                     return tmp
-            # long (y + color)
-            if color_col and y_key and y_key in df.columns:
-                tmp = df.copy()
+            # long (y + color) — сортируем по сумме по X
+            if color_col and y_key and y_key in df_local.columns:
+                tmp = df_local.copy()
                 tmp[y_key] = _clean_num(tmp[y_key])
                 agg = (tmp.groupby(x_key, as_index=False)[y_key]
                            .sum()
                            .sort_values(y_key, ascending=asc))
-                order = agg[x_key].tolist()
-                df[x_key] = pd.Categorical(df[x_key], categories=order, ordered=True)
-                return df.sort_values(x_key)
-        return df
+                order = agg[x_key].astype(str).tolist()
+                # делаем order уникальным
+                seen, order_unique = set(), []
+                for v in order:
+                    if v not in seen:
+                        seen.add(v)
+                        order_unique.append(v)
+                df_local[x_key] = pd.Categorical(df_local[x_key].astype(str),
+                                                 categories=order_unique, ordered=True)
+                return df_local.sort_values(x_key)
+        return df_local
 
-        df = _maybe_sort(df)
+    # ВЫЗОВ СОРТИРОВКИ
+    df = _maybe_sort(df)
 
-    # Зафиксировать порядок категорий по оси X ровно как в df сейчас
+    # Зафиксировать порядок категорий по оси X ровно как в df сейчас (и убрать повторы)
     if x_key in df.columns:
-        order = df[x_key].tolist()
-        df[x_key] = pd.Categorical(df[x_key], categories=order, ordered=True)
-
-    
+        x_vals = df[x_key].astype(str).tolist()
+        seen, order = set(), []
+        for v in x_vals:
+            if v not in seen:
+                seen.add(v)
+                order.append(v)
+        df[x_key] = pd.Categorical(df[x_key].astype(str), categories=order, ordered=True)
 
     # --- построение ---
     if ctype == "line_chart":
@@ -247,7 +259,8 @@ def show_chart(spec: dict):
 
         elif color_col and color_col in df.columns and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
-            pivot = df.pivot(index=x_key, columns=color_col, values=y_key).reset_index()
+            pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
+                       .reset_index())
             y_cols = [c for c in pivot.columns if c != x_key]
             st.line_chart(
                 pivot, x=x_key, y=y_cols,
@@ -287,7 +300,8 @@ def show_chart(spec: dict):
 
         elif color_col and color_col in df.columns and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
-            pivot = df.pivot(index=x_key, columns=color_col, values=y_key).reset_index()
+            pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
+                       .reset_index())
             y_cols = [c for c in pivot.columns if c != x_key]
             st.bar_chart(
                 pivot, x=x_key, y=y_cols,
