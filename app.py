@@ -46,7 +46,6 @@ def _try_parse_json_string(s: str):
     if txt.startswith("```"):
         txt = re.sub(r"^```(?:json|JSON)?\s*", "", txt)
         txt = re.sub(r"\s*```$", "", txt)
-    # если есть лишний префикс — вытащим первую {...}
     if not txt.lstrip().startswith("{"):
         m = re.search(r"\{[\s\S]*\}\s*$", txt)
         if m:
@@ -96,11 +95,8 @@ def parse_n8n_response(response_json):
         out = _dig_for_output(response_json)
         if not isinstance(out, dict):
             return {"text": "Не найден корректный 'output' в ответе сервера.", "chart": None}
-
-        # разворачиваем лишние nesting-и: {"output":{"output":{...}}}
         while isinstance(out, dict) and "output" in out and isinstance(out["output"], dict):
             out = out["output"]
-
         text = out.get("analytical_report", "Отчёт отсутствует.")
         chart = out.get("chart_data", None)
         return {"text": text, "chart": chart}
@@ -148,20 +144,27 @@ def show_chart(spec: dict):
     ctype     = (spec.get("type") or "bar_chart").lower()
     sort_flag = (spec.get("sort") or None)     # "y_asc" | "y_desc" | None
 
-    # width/height: Streamlit ждёт int|None
-    def _as_size(v):
-        if v is None:
-            return None
-        if isinstance(v, (int, float)):
-            return int(v)
+    # --- размеры: Streamlit 1.50 ---
+    def _as_width(v):
+        if v in ("stretch", "content"):
+            return v
         try:
-            return int(str(v).strip())
+            n = int(v) if v is not None else None
+            return n if (isinstance(n, int) and n > 0) else "stretch"
         except Exception:
-            return None
+            return "stretch"
 
-    width  = _as_size(spec.get("width"))
-    height = _as_size(spec.get("height"))
-    use_container_width = spec.get("use_container_width", True) if width is None else False
+    def _as_height(v):
+        if v in ("content", "stretch"):
+            return v
+        try:
+            n = int(v) if v is not None else None
+            return n if (isinstance(n, int) and n > 0) else "content"
+        except Exception:
+            return "content"
+
+    width  = _as_width(spec.get("width"))
+    height = _as_height(spec.get("height"))
 
     if not (data and x_key and (y_key or y_keys or (y_key and color_col))):
         st.error("chart_data неполный: нужны data, x_column и (y_column | y_columns | y_column+color_column).")
@@ -174,7 +177,7 @@ def show_chart(spec: dict):
     def _clean_num(s: pd.Series) -> pd.Series:
         return (
             s.astype(str)
-             .str.replace("\u00A0","",regex=False)  # NBSP
+             .str.replace("\u00A0","",regex=False)
              .str.replace("%","",regex=False)
              .str.replace(" ","",regex=False)
              .str.replace(",",".",regex=False)
@@ -215,7 +218,6 @@ def show_chart(spec: dict):
                            .sum()
                            .sort_values(y_key, ascending=asc))
                 order = agg[x_key].astype(str).tolist()
-                # делаем order уникальным
                 seen, order_unique = set(), []
                 for v in order:
                     if v not in seen:
@@ -252,20 +254,14 @@ def show_chart(spec: dict):
             if plot_df.empty:
                 st.info("Все значения метрик пусты после очистки.")
                 return
-            st.line_chart(
-                plot_df, x=x_key, y=cols,
-                width=width, height=height, use_container_width=use_container_width
-            )
+            st.line_chart(plot_df, x=x_key, y=cols, width=width, height=height)
 
         elif color_col and color_col in df.columns and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
             pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
                        .reset_index())
             y_cols = [c for c in pivot.columns if c != x_key]
-            st.line_chart(
-                pivot, x=x_key, y=y_cols,
-                width=width, height=height, use_container_width=use_container_width
-            )
+            st.line_chart(pivot, x=x_key, y=y_cols, width=width, height=height)
 
         else:
             if y_key not in df.columns:
@@ -276,10 +272,7 @@ def show_chart(spec: dict):
             if plot_df.empty:
                 st.info("Значения метрики пустые после очистки.")
                 return
-            st.line_chart(
-                plot_df, x=x_key, y=y_key,
-                width=width, height=height, use_container_width=use_container_width
-            )
+            st.line_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
 
     else:  # BAR
         if y_keys:  # wide multi-series
@@ -293,20 +286,14 @@ def show_chart(spec: dict):
             if plot_df.empty:
                 st.info("Все значения метрик пусты после очистки.")
                 return
-            st.bar_chart(
-                plot_df, x=x_key, y=cols,
-                width=width, height=height, use_container_width=use_container_width
-            )
+            st.bar_chart(plot_df, x=x_key, y=cols, width=width, height=height)
 
         elif color_col and color_col in df.columns and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
             pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
                        .reset_index())
             y_cols = [c for c in pivot.columns if c != x_key]
-            st.bar_chart(
-                pivot, x=x_key, y=y_cols,
-                width=width, height=height, use_container_width=use_container_width
-            )
+            st.bar_chart(pivot, x=x_key, y=y_cols, width=width, height=height)
 
         else:
             if y_key not in df.columns:
@@ -315,12 +302,9 @@ def show_chart(spec: dict):
             df[y_key] = _clean_num(df[y_key])
             plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
             if plot_df.empty:
-                st.info("Значения метрики пустые после очистки.")
+                st.info("Значения метрики пусты после очистки.")
                 return
-            st.bar_chart(
-                plot_df, x=x_key, y=y_key,
-                width=width, height=height, use_container_width=use_container_width
-            )
+            st.bar_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
 
 # ========= РЕНДЕР ИСТОРИИ =========
 for msg in st.session_state.messages:
@@ -333,16 +317,13 @@ for msg in st.session_state.messages:
 if prompt := st.chat_input("Go slow—I’m cloud-based. Rust requires metal."):
     st.session_state.last_interaction = time.time()
 
-    # 1) показать сообщение пользователя и записать в историю
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 2) запрос к n8n
     resp = ask_agent(prompt)
     text = resp.get("text", "_Пустой ответ от агента_")
     chart = resp.get("chart")
 
-    # 3) добавить ответ ассистента в историю и пере-рендерить РОВНО один раз
     st.session_state.messages.append({"role": "assistant", "content": text, "chart": chart})
     st.rerun()
