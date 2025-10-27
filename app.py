@@ -1,4 +1,4 @@
-import re
+import re 
 import json
 import time
 import uuid
@@ -241,7 +241,73 @@ def show_chart(spec: dict):
                 order.append(v)
         df[x_key] = pd.Categorical(df[x_key].astype(str), categories=order, ordered=True)
 
-    # --- построение ---
+    # ====== NEW: AREA CHART ======
+    if ctype == "area_chart":
+        # wide multi-series
+        if y_keys:
+            cols = [y for y in y_keys if y in df.columns]
+            if not cols:
+                st.error("Нет ни одной из указанных y_columns в data.")
+                return
+            for y in cols:
+                df[y] = _clean_num(df[y])
+            plot_df = df[[x_key] + cols].dropna(how="all", subset=cols)
+            if plot_df.empty:
+                st.info("Все значения метрик пусты после очистки.")
+                return
+            st.area_chart(
+                plot_df,
+                x=x_key,
+                y=cols,
+                color=spec.get("color"),                 # список цветов под серии (wide), опц.
+                stack=spec.get("stack"),                 # True/False/"normalize"/"center"/None
+                width=None if not isinstance(width, int) else width,
+                height=None if not isinstance(height, int) else height,
+                use_container_width=(width != width),    # True если width не int
+            )
+            return
+
+        # long: y + color_column → сводим в wide
+        if color_col and y_key and (y_key in df.columns):
+            df[y_key] = _clean_num(df[y_key])
+            pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
+                       .reset_index())
+            y_cols = [c for c in pivot.columns if c != x_key]
+            st.area_chart(
+                pivot,
+                x=x_key,
+                y=y_cols,
+                color=spec.get("color"),
+                stack=spec.get("stack"),
+                width=None if not isinstance(width, int) else width,
+                height=None if not isinstance(height, int) else height,
+                use_container_width=(width != width),
+            )
+            return
+
+        # single-series
+        if y_key not in df.columns:
+            st.error("y_column не найден в data.")
+            return
+        df[y_key] = _clean_num(df[y_key])
+        plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
+        if plot_df.empty:
+            st.info("Значения метрики пусты после очистки.")
+            return
+        st.area_chart(
+            plot_df,
+            x=x_key,
+            y=y_key,
+            color=spec.get("color"),                     # строка/rgba, опц.
+            stack=spec.get("stack"),
+            width=None if not isinstance(width, int) else width,
+            height=None if not isinstance(height, int) else height,
+            use_container_width=(width != width),
+        )
+        return
+    # ====== END AREA CHART ======
+
+    # ===== line_chart (как было) =====
     if ctype == "line_chart":
         if y_keys:  # wide multi-series
             cols = [y for y in y_keys if y in df.columns]
@@ -255,14 +321,12 @@ def show_chart(spec: dict):
                 st.info("Все значения метрик пусты после очистки.")
                 return
             st.line_chart(plot_df, x=x_key, y=cols, width=width, height=height)
-
-        elif color_col and color_col in df.columns and y_key in df.columns:
+        elif color_col and y_key and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
             pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
                        .reset_index())
             y_cols = [c for c in pivot.columns if c != x_key]
             st.line_chart(pivot, x=x_key, y=y_cols, width=width, height=height)
-
         else:
             if y_key not in df.columns:
                 st.error("y_column не найден в data.")
@@ -270,10 +334,12 @@ def show_chart(spec: dict):
             df[y_key] = _clean_num(df[y_key])
             plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
             if plot_df.empty:
-                st.info("Значения метрики пустые после очистки.")
+                st.info("Значения метрики пусты после очистки.")
                 return
             st.line_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
+        return
 
+    # ===== bar_chart (как было) =====
     else:  # BAR
         if y_keys:  # wide multi-series
             cols = [y for y in y_keys if y in df.columns]
@@ -288,7 +354,7 @@ def show_chart(spec: dict):
                 return
             st.bar_chart(plot_df, x=x_key, y=cols, width=width, height=height)
 
-        elif color_col and color_col in df.columns and y_key in df.columns:
+        elif color_col and y_key and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
             pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
                        .reset_index())
@@ -302,7 +368,7 @@ def show_chart(spec: dict):
             df[y_key] = _clean_num(df[y_key])
             plot_df = df[[x_key, y_key]].dropna(subset=[y_key])
             if plot_df.empty:
-                st.info("Значения метрики пусты после очистки.")
+                st.info("Значения метрик пусты после очистки.")
                 return
             st.bar_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
 
