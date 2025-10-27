@@ -1,4 +1,4 @@
-import re 
+import re
 import json
 import time
 import uuid
@@ -144,27 +144,16 @@ def show_chart(spec: dict):
     ctype     = (spec.get("type") or "bar_chart").lower()
     sort_flag = (spec.get("sort") or None)     # "y_asc" | "y_desc" | None
 
-    # --- размеры: Streamlit 1.50 ---
-    def _as_width(v):
-        if v in ("stretch", "content"):
-            return v
-        try:
-            n = int(v) if v is not None else None
-            return n if (isinstance(n, int) and n > 0) else "stretch"
-        except Exception:
-            return "stretch"
-
-    def _as_height(v):
-        if v in ("content", "stretch"):
-            return v
-        try:
-            n = int(v) if v is not None else None
-            return n if (isinstance(n, int) and n > 0) else "content"
-        except Exception:
-            return "content"
-
-    width  = _as_width(spec.get("width"))
-    height = _as_height(spec.get("height"))
+    # --- РАЗМЕРЫ: фиксированная логика ширины/высоты ---
+    raw_w = spec.get("width")
+    raw_h = spec.get("height")
+    if isinstance(raw_w, int) and raw_w > 0:
+        width = raw_w
+        use_container_width = False
+    else:
+        width = None
+        use_container_width = True
+    height = raw_h if isinstance(raw_h, int) and raw_h > 0 else None
 
     if not (data and x_key and (y_key or y_keys or (y_key and color_col))):
         st.error("chart_data неполный: нужны data, x_column и (y_column | y_columns | y_column+color_column).")
@@ -187,7 +176,7 @@ def show_chart(spec: dict):
     # --- сортировка (НЕ сортируем по X по умолчанию) ---
     def _maybe_sort(df_in: pd.DataFrame) -> pd.DataFrame:
         df_local = df_in.copy()
-        # удаляем дубли пар (x,y), иначе pivot/категории дублируются
+        # удаляем дубли пар (x,y)
         if y_key and y_key in df_local.columns:
             df_local = df_local.drop_duplicates(subset=[x_key, y_key], keep="first")
         else:
@@ -195,12 +184,10 @@ def show_chart(spec: dict):
 
         if sort_flag in ("y_asc", "y_desc"):
             asc = (sort_flag == "y_asc")
-            # single y
             if y_key and y_key in df_local.columns:
                 tmp = df_local.copy()
                 tmp[y_key] = _clean_num(tmp[y_key])
                 return tmp.sort_values(y_key, ascending=asc)
-            # wide y_columns
             if y_keys:
                 cols = [c for c in y_keys if c in df_local.columns]
                 if cols:
@@ -210,7 +197,6 @@ def show_chart(spec: dict):
                     tmp["_sum_y"] = tmp[cols].sum(axis=1, skipna=True)
                     tmp = tmp.sort_values("_sum_y", ascending=asc).drop(columns="_sum_y")
                     return tmp
-            # long (y + color) — сортируем по сумме по X
             if color_col and y_key and y_key in df_local.columns:
                 tmp = df_local.copy()
                 tmp[y_key] = _clean_num(tmp[y_key])
@@ -241,7 +227,7 @@ def show_chart(spec: dict):
                 order.append(v)
         df[x_key] = pd.Categorical(df[x_key].astype(str), categories=order, ordered=True)
 
-    # ====== NEW: AREA CHART ======
+    # ====== AREA CHART ======
     if ctype == "area_chart":
         # wide multi-series
         if y_keys:
@@ -259,11 +245,11 @@ def show_chart(spec: dict):
                 plot_df,
                 x=x_key,
                 y=cols,
-                color=spec.get("color"),                 # список цветов под серии (wide), опц.
-                stack=spec.get("stack"),                 # True/False/"normalize"/"center"/None
-                width=None if not isinstance(width, int) else width,
-                height=None if not isinstance(height, int) else height,
-                use_container_width=(width != width),    # True если width не int
+                color=spec.get("color"),
+                stack=spec.get("stack"),
+                width=width,
+                height=height,
+                use_container_width=use_container_width,
             )
             return
 
@@ -279,9 +265,9 @@ def show_chart(spec: dict):
                 y=y_cols,
                 color=spec.get("color"),
                 stack=spec.get("stack"),
-                width=None if not isinstance(width, int) else width,
-                height=None if not isinstance(height, int) else height,
-                use_container_width=(width != width),
+                width=width,
+                height=height,
+                use_container_width=use_container_width,
             )
             return
 
@@ -298,16 +284,15 @@ def show_chart(spec: dict):
             plot_df,
             x=x_key,
             y=y_key,
-            color=spec.get("color"),                     # строка/rgba, опц.
+            color=spec.get("color"),
             stack=spec.get("stack"),
-            width=None if not isinstance(width, int) else width,
-            height=None if not isinstance(height, int) else height,
-            use_container_width=(width != width),
+            width=width,
+            height=height,
+            use_container_width=use_container_width,
         )
         return
-    # ====== END AREA CHART ======
 
-    # ===== line_chart (как было) =====
+    # ===== line_chart =====
     if ctype == "line_chart":
         if y_keys:  # wide multi-series
             cols = [y for y in y_keys if y in df.columns]
@@ -320,13 +305,13 @@ def show_chart(spec: dict):
             if plot_df.empty:
                 st.info("Все значения метрик пусты после очистки.")
                 return
-            st.line_chart(plot_df, x=x_key, y=cols, width=width, height=height)
+            st.line_chart(plot_df, x=x_key, y=cols, width=width, height=height, use_container_width=use_container_width)
         elif color_col and y_key and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
             pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
                        .reset_index())
             y_cols = [c for c in pivot.columns if c != x_key]
-            st.line_chart(pivot, x=x_key, y=y_cols, width=width, height=height)
+            st.line_chart(pivot, x=x_key, y=y_cols, width=width, height=height, use_container_width=use_container_width)
         else:
             if y_key not in df.columns:
                 st.error("y_column не найден в data.")
@@ -336,10 +321,10 @@ def show_chart(spec: dict):
             if plot_df.empty:
                 st.info("Значения метрики пусты после очистки.")
                 return
-            st.line_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
+            st.line_chart(plot_df, x=x_key, y=y_key, width=width, height=height, use_container_width=use_container_width)
         return
 
-    # ===== bar_chart (как было) =====
+    # ===== bar_chart =====
     else:  # BAR
         if y_keys:  # wide multi-series
             cols = [y for y in y_keys if y in df.columns]
@@ -352,14 +337,14 @@ def show_chart(spec: dict):
             if plot_df.empty:
                 st.info("Все значения метрик пусты после очистки.")
                 return
-            st.bar_chart(plot_df, x=x_key, y=cols, width=width, height=height)
+            st.bar_chart(plot_df, x=x_key, y=cols, width=width, height=height, use_container_width=use_container_width)
 
         elif color_col and y_key and y_key in df.columns:
             df[y_key] = _clean_num(df[y_key])
             pivot = (df.pivot_table(index=x_key, columns=color_col, values=y_key, aggfunc="sum")
                        .reset_index())
             y_cols = [c for c in pivot.columns if c != x_key]
-            st.bar_chart(pivot, x=x_key, y=y_cols, width=width, height=height)
+            st.bar_chart(pivot, x=x_key, y=y_cols, width=width, height=height, use_container_width=use_container_width)
 
         else:
             if y_key not in df.columns:
@@ -370,7 +355,7 @@ def show_chart(spec: dict):
             if plot_df.empty:
                 st.info("Значения метрик пусты после очистки.")
                 return
-            st.bar_chart(plot_df, x=x_key, y=y_key, width=width, height=height)
+            st.bar_chart(plot_df, x=x_key, y=y_key, width=width, height=height, use_container_width=use_container_width)
 
 # ========= РЕНДЕР ИСТОРИИ =========
 for msg in st.session_state.messages:
